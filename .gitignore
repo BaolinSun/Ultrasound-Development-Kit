@@ -1,0 +1,10 @@
+*
+!*/
+!*.py
+!*.json
+!*.m
+!.gitignore
+
+.vscode/
+__pycache__/
+*.py[cod]

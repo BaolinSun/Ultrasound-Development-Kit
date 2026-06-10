@@ -1,0 +1,81 @@
+{
+  "description": "Default AFE5832LP runtime configuration mirrored from vitis/B_mode_focus_imaging/src/AFE5832/afe5832.c AFE5832_init().",
+  "afe5832": {
+    "input_impedance_ohm": 50,
+    "vca": {
+      "lna_gain_db": 21,
+      "pga_gain_db": 27,
+      "lpf_mhz": 20,
+      "lna_hpf_khz": 310,
+      "power_mode": "low_noise"
+    },
+    "dhpf": {
+      "groups": [
+        { "group": 0, "enable": false, "corner_code": 2, "round_enable": false },
+        { "group": 1, "enable": false, "corner_code": 2, "round_enable": false },
+        { "group": 2, "enable": false, "corner_code": 2, "round_enable": false },
+        { "group": 3, "enable": false, "corner_code": 2, "round_enable": false }
+      ]
+    },
+    "dtgc": {
+      "profiles": [
+        {
+          "profile": 0,
+          "start_gain": 16,
+          "stop_gain": 144,
+          "pos_step": 0,
+          "pos_step_feq": 3,
+          "neg_step": 31,
+          "neg_step_feq": 7
+        }
+      ],
+      "_source": "Matches afe5832.c lines 172-180: start_gain=16, stop_gain=144, pos_step=0, pos_step_feq=3, neg_step=31, neg_step_feq=7.",
+      "raw_registers": [
+        { "addr": "0xB5", "data": "0x011F" },
+        { "addr": "0xB6", "data": "0x4800" }
+      ]
+    },
+    "raw_registers": [
+      { "map": "ADC", "addr": "0x01", "data": "0x0000" },
+      { "map": "ADC", "addr": "0x03", "data": "0x3010" },
+      { "map": "ADC", "addr": "0x0D", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x0E", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x0D", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x0F", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x10", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x11", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x12", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x13", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x14", "data": "0xF800" },
+
+
+      { "map": "ADC", "addr": "0x19", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1A", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1B", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1C", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1D", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1E", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x1F", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x20", "data": "0xF800" },
+
+      { "map": "ADC", "addr": "0x25", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x26", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x27", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x28", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x29", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x2A", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x2B", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x2C", "data": "0xF800" },
+
+      { "map": "ADC", "addr": "0x31", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x32", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x33", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x34", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x35", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x36", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x37", "data": "0xF800" },
+      { "map": "ADC", "addr": "0x38", "data": "0xF800" }
+      
+    ]
+  }
+}
