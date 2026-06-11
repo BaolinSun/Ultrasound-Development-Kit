@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSlider,
+    QSplitter,
     QVBoxLayout,
     QWidget,
 )
@@ -45,7 +46,8 @@ from ultrasound_pipeline_adapter import UltrasoundPipeline
 EXTERNAL_PS_TOOLS_DIR = Path(r"D:\MyProjects\zynq_prj\ultrasound_focus_B_mode_imaging\tools")
 EXTERNAL_PS_CONFIG_GUI = EXTERNAL_PS_TOOLS_DIR / "ultrasound_config_gui.py"
 EXTERNAL_PS_UART_TOOL = EXTERNAL_PS_TOOLS_DIR / "ultrasound_config_uart.py"
-TGC_MAX_GAIN = 4.0
+TGC_MIN_DB = -24.0
+TGC_MAX_DB = 24.0
 PS_UART_TARGETS = [
     "afe5832",
     "tx7332",
@@ -467,15 +469,17 @@ class GraymapCurveWidget(QWidget):
 
 
 class TgcCurveWidget(QWidget):
-    """Interactive TGC curve editor generating a 6144-entry gain array."""
+    """Interactive TGC curve editor storing dB points and emitting linear gain."""
 
     tgc_changed = Signal(object, object)
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.num_samples = 6144
-        self.max_gain = TGC_MAX_GAIN
+        self.min_db = TGC_MIN_DB
+        self.max_db = TGC_MAX_DB
         self.ctrl_points = self.default_control_points()
+        self.tgc_db_curve = self._make_db_curve()
         self.tgc_gain = self._make_gain()
         self._drag_index = None
         self._selected_index = None
@@ -485,16 +489,16 @@ class TgcCurveWidget(QWidget):
     def default_control_points(self):
         return np.array(
             [
-                [0, 1.0],
-                [512, 1.0],
-                [1024, 1.0],
-                [2048, 1.0],
-                [3072, 1.0],
-                [4096, 1.0],
-                [4608, 1.0],
-                [5120, 1.0],
-                [5632, 1.0],
-                [6143, 1.0],
+                [0, 0.0],
+                [512, 0.0],
+                [1024, 0.0],
+                [2048, 0.0],
+                [3072, 0.0],
+                [4096, 0.0],
+                [4608, 0.0],
+                [5120, 0.0],
+                [5632, 0.0],
+                [6143, 0.0],
             ],
             dtype=np.float32,
         )
@@ -504,14 +508,15 @@ class TgcCurveWidget(QWidget):
         self._selected_index = None
         self._update_gain()
 
-    def set_control_points(self, control_points, max_gain=TGC_MAX_GAIN, num_samples=6144):
+    def set_control_points(self, control_points, min_db=TGC_MIN_DB, max_db=TGC_MAX_DB, num_samples=6144):
         self.num_samples = int(num_samples)
-        self.max_gain = min(float(max_gain), TGC_MAX_GAIN)
+        self.min_db = TGC_MIN_DB
+        self.max_db = TGC_MAX_DB
         points = np.asarray(control_points, dtype=np.float32)
         if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] < 2:
             raise ValueError("TGC control_points must be an Nx2 array with at least 2 points")
         points[:, 0] = np.clip(points[:, 0], 0, self.num_samples - 1)
-        points[:, 1] = np.clip(points[:, 1], 0.0, self.max_gain)
+        points[:, 1] = np.clip(points[:, 1], self.min_db, self.max_db)
         points = points[np.argsort(points[:, 0])]
         points[0, 0] = 0.0
         points[-1, 0] = float(self.num_samples - 1)
@@ -526,7 +531,9 @@ class TgcCurveWidget(QWidget):
     def to_json_data(self):
         return {
             "num_samples": int(self.num_samples),
-            "max_gain": float(self.max_gain),
+            "unit": "dB",
+            "min_db": float(self.min_db),
+            "max_db": float(self.max_db),
             "control_points": [[float(x), float(y)] for x, y in self.ctrl_points],
         }
 
@@ -534,31 +541,41 @@ class TgcCurveWidget(QWidget):
         if self._selected_index is None:
             return f"{len(self.ctrl_points)} control points"
         x, y = self.ctrl_points[self._selected_index]
-        return f"Point {self._selected_index + 1}: z={int(round(x))}, gain={y:.2f}"
+        return f"Point {self._selected_index + 1}: z={int(round(x))}, TGC={y:+.1f} dB"
 
     def _plot_rect(self):
         return self.rect().adjusted(42, 18, -14, -30)
 
-    def _make_gain(self):
+    def _make_db_curve(self):
         xq = np.arange(self.num_samples, dtype=np.float32)
         return np.interp(xq, self.ctrl_points[:, 0], self.ctrl_points[:, 1]).astype(np.float32)
 
+    def _make_gain(self):
+        return np.power(10.0, self.tgc_db_curve / 20.0).astype(np.float32)
+
     def _update_gain(self):
+        self.tgc_db_curve = self._make_db_curve()
         self.tgc_gain = self._make_gain()
         self.tgc_changed.emit(self.tgc_gain.copy(), self.ctrl_points.copy())
         self.update()
 
+    def peak_summary_text(self):
+        peak_db = float(np.max(self.tgc_db_curve))
+        peak_gain = float(np.max(self.tgc_gain))
+        return f"TGC range: {self.min_db:.1f} to {self.max_db:+.1f} dB    Peak gain: {peak_db:+.1f} dB / {peak_gain:.2f}x"
+
     def _point_to_pixel(self, x, y):
         rect = self._plot_rect()
         px = rect.left() + int((float(x) / max(1, self.num_samples - 1)) * rect.width())
-        py = rect.bottom() - int((float(y) / max(1e-6, self.max_gain)) * rect.height())
+        span = max(1e-6, self.max_db - self.min_db)
+        py = rect.bottom() - int(((float(y) - self.min_db) / span) * rect.height())
         return QPoint(px, py)
 
     def _pixel_to_point(self, pos):
         rect = self._plot_rect()
         x = (pos.x() - rect.left()) / max(1, rect.width()) * (self.num_samples - 1)
-        y = (rect.bottom() - pos.y()) / max(1, rect.height()) * self.max_gain
-        return float(np.clip(x, 0, self.num_samples - 1)), float(np.clip(y, 0, self.max_gain))
+        y = self.min_db + (rect.bottom() - pos.y()) / max(1, rect.height()) * (self.max_db - self.min_db)
+        return float(np.clip(x, 0, self.num_samples - 1)), float(np.clip(y, self.min_db, self.max_db))
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -573,11 +590,11 @@ class TgcCurveWidget(QWidget):
         painter.save()
         painter.translate(12, rect.center().y() + 18)
         painter.rotate(-90)
-        painter.drawText(0, 0, "Gain")
+        painter.drawText(0, 0, "TGC (dB)")
         painter.restore()
 
         x_ticks = [0, 1024, 2048, 3072, 4096, 5120, 6143]
-        y_ticks = [0, 1, 2, 3, 4]
+        y_ticks = [-24, -12, 0, 12, 24]
         painter.setFont(QFont("Segoe UI", 7))
         for value in x_ticks:
             x = rect.left() + int(value / max(1, self.num_samples - 1) * rect.width())
@@ -586,14 +603,14 @@ class TgcCurveWidget(QWidget):
             painter.setPen(QColor("#7892aa"))
             painter.drawText(x - 18, rect.bottom() + 16, 36, 12, Qt.AlignmentFlag.AlignCenter, str(value))
         for value in y_ticks:
-            y = rect.bottom() - int(value / self.max_gain * rect.height())
+            y = rect.bottom() - int((value - self.min_db) / (self.max_db - self.min_db) * rect.height())
             painter.setPen(QPen(QColor("#173049"), 1))
             painter.drawLine(rect.left(), y, rect.right(), y)
             painter.setPen(QColor("#7892aa"))
             painter.drawText(rect.left() - 38, y - 6, 32, 12, Qt.AlignmentFlag.AlignRight, str(value))
 
         curve_x = np.linspace(0, self.num_samples - 1, 256, dtype=np.float32)
-        curve_y = np.interp(curve_x, np.arange(self.num_samples, dtype=np.float32), self.tgc_gain)
+        curve_y = np.interp(curve_x, np.arange(self.num_samples, dtype=np.float32), self.tgc_db_curve)
         points = [self._point_to_pixel(x, y) for x, y in zip(curve_x, curve_y)]
         painter.setPen(QPen(QColor("#45e6ff"), 2))
         if len(points) > 1:
@@ -709,7 +726,16 @@ class UltrasoundMainWindow(QMainWindow):
         main_layout.setContentsMargins(14, 14, 14, 14)
         main_layout.setSpacing(14)
 
-        image_column = QVBoxLayout()
+        self.main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        self.main_splitter.setObjectName("MainSplitter")
+        self.main_splitter.setChildrenCollapsible(False)
+        main_layout.addWidget(self.main_splitter, 1)
+
+        image_panel = QWidget()
+        image_panel.setObjectName("ImagePanel")
+        image_panel.setMinimumWidth(520)
+        image_column = QVBoxLayout(image_panel)
+        image_column.setContentsMargins(0, 0, 0, 0)
         image_column.setSpacing(10)
 
         header = QFrame()
@@ -741,10 +767,11 @@ class UltrasoundMainWindow(QMainWindow):
         image_column.addWidget(header)
         image_column.addWidget(self.image_widget, 1)
         image_column.addWidget(self._make_quick_controls_panel())
-        main_layout.addLayout(image_column, 1)
+        self.main_splitter.addWidget(image_panel)
 
         side_panel = QFrame()
         side_panel.setObjectName("SidePanel")
+        side_panel.setMinimumWidth(370)
         side_layout = QVBoxLayout(side_panel)
         side_layout.setContentsMargins(14, 14, 14, 14)
         side_layout.setSpacing(12)
@@ -760,11 +787,14 @@ class UltrasoundMainWindow(QMainWindow):
         side_scroll.setObjectName("SideScrollArea")
         side_scroll.setWidgetResizable(True)
         side_scroll.setFrameShape(QFrame.Shape.NoFrame)
-        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         side_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        side_scroll.setFixedWidth(350)
+        side_scroll.setMinimumWidth(390)
         side_scroll.setWidget(side_panel)
-        main_layout.addWidget(side_scroll)
+        self.main_splitter.addWidget(side_scroll)
+        self.main_splitter.setStretchFactor(0, 1)
+        self.main_splitter.setStretchFactor(1, 0)
+        self.main_splitter.setSizes([1100, 430])
 
     def _make_controls_panel(self):
         panel = QFrame()
@@ -986,7 +1016,7 @@ class UltrasoundMainWindow(QMainWindow):
 
         self.tgc_point_label = QLabel(self.tgc_curve.selected_point_text())
         self.tgc_point_label.setObjectName("ParamName")
-        self.tgc_max_gain_label = QLabel(f"Max gain: {np.max(self.tgc_curve.tgc_gain):.2f}x")
+        self.tgc_max_gain_label = QLabel(self.tgc_curve.peak_summary_text())
         self.tgc_max_gain_label.setObjectName("ParamValue")
 
         tgc_button_row = QHBoxLayout()
@@ -996,7 +1026,8 @@ class UltrasoundMainWindow(QMainWindow):
         self.tgc_load_button = QPushButton("Load TGC")
         for button in (self.tgc_reset_button, self.tgc_save_button, self.tgc_load_button):
             button.setObjectName("ToolButton")
-            tgc_button_row.addWidget(button)
+            button.setMinimumWidth(0)
+            tgc_button_row.addWidget(button, 1)
 
         layout.addWidget(heading)
         layout.addWidget(self.tgc_enable_checkbox)
@@ -1509,7 +1540,7 @@ class UltrasoundMainWindow(QMainWindow):
     def _tgc_curve_changed(self, gain, control_points):
         self.pipeline.set_tgc_gain(gain)
         self.tgc_point_label.setText(self.tgc_curve.selected_point_text())
-        self.tgc_max_gain_label.setText(f"Max gain: {float(np.max(gain)):.2f}x")
+        self.tgc_max_gain_label.setText(self.tgc_curve.peak_summary_text())
 
     def _tgc_enabled_changed(self, enabled):
         self.pipeline.set_tgc_enabled(bool(enabled))
@@ -1540,9 +1571,15 @@ class UltrasoundMainWindow(QMainWindow):
             return
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8"))
+            control_points = np.asarray(data["control_points"], dtype=np.float32)
+            unit = str(data.get("unit", "")).lower()
+            if unit != "db" and "max_gain" in data:
+                control_points = control_points.copy()
+                control_points[:, 1] = 20.0 * np.log10(np.clip(control_points[:, 1], 1e-6, None))
             self.tgc_curve.set_control_points(
-                data["control_points"],
-                max_gain=TGC_MAX_GAIN,
+                control_points,
+                min_db=float(data.get("min_db", TGC_MIN_DB)),
+                max_db=float(data.get("max_db", TGC_MAX_DB)),
                 num_samples=int(data.get("num_samples", 6144)),
             )
             self.pipeline.set_tgc_enabled(self.tgc_enable_checkbox.isChecked())
@@ -1710,6 +1747,16 @@ class UltrasoundMainWindow(QMainWindow):
                 background: #07111c;
                 border-bottom-left-radius: 14px;
                 border-bottom-right-radius: 14px;
+            }
+            #MainSplitter::handle {
+                background: #0b1725;
+                border-left: 1px solid #1c3148;
+                border-right: 1px solid #07111c;
+                width: 8px;
+            }
+            #MainSplitter::handle:hover {
+                background: #12324a;
+                border-left: 1px solid #22d3ee;
             }
             #HeaderPanel, #SidePanel, #Panel {
                 background: #101c2a;

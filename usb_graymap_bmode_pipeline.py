@@ -24,7 +24,10 @@ DEFAULT_BRIGHTNESS_DB = 3.0
 DEFAULT_CONTRAST_GAIN = 1.0
 DEFAULT_NOISE_FLOOR_DB = -45.0
 DEFAULT_LOG10_FRAC_BITS = 14
-DEFAULT_TGC_MAX_GAIN = 4.0
+DEFAULT_TGC_MIN_DB = -24.0
+DEFAULT_TGC_MAX_DB = 24.0
+DEFAULT_TGC_MIN_GAIN = 10 ** (DEFAULT_TGC_MIN_DB / 20.0)
+DEFAULT_TGC_MAX_GAIN = 10 ** (DEFAULT_TGC_MAX_DB / 20.0)
 DDR_RING_BYTES = 1024 * 1000
 LINE_HEADER_WORDS = 8
 WORDS_PER_LINE = DEFAULT_RF_DEPTH + LINE_HEADER_WORDS
@@ -65,31 +68,42 @@ def get_default_bmode_params():
 
 
 def default_tgc_control_points():
-    """Default TGC curve control points over the 6144-sample depth axis."""
+    """Default TGC dB control points over the 6144-sample depth axis."""
     return np.array(
         [
-            [0, 1.0],
-            [512, 1.0],
-            [1024, 1.0],
-            [2048, 1.0],
-            [3072, 1.0],
-            [4096, 1.0],
-            [4608, 1.0],
-            [5120, 1.0],
-            [5632, 1.0],
-            [DEFAULT_RF_DEPTH - 1, 1.0],
+            [0, 0.0],
+            [512, 0.0],
+            [1024, 0.0],
+            [2048, 0.0],
+            [3072, 0.0],
+            [4096, 0.0],
+            [4608, 0.0],
+            [5120, 0.0],
+            [5632, 0.0],
+            [DEFAULT_RF_DEPTH - 1, 0.0],
         ],
         dtype=np.float32,
     )
 
 
-def make_tgc_gain(ctrl_points=None, num_samples=DEFAULT_RF_DEPTH, max_gain=DEFAULT_TGC_MAX_GAIN):
-    """Interpolate control points into a full-depth TGC gain curve."""
+def tgc_db_to_gain(tgc_db):
+    """Convert dB TGC values to linear gain."""
+    return np.power(10.0, np.asarray(tgc_db, dtype=np.float32) / 20.0).astype(np.float32)
+
+
+def tgc_gain_to_db(tgc_gain):
+    """Convert linear TGC gain values to dB."""
+    safe_gain = np.clip(np.asarray(tgc_gain, dtype=np.float32), 1e-6, None)
+    return (20.0 * np.log10(safe_gain)).astype(np.float32)
+
+
+def make_tgc_db_curve(ctrl_points=None, num_samples=DEFAULT_RF_DEPTH, min_db=DEFAULT_TGC_MIN_DB, max_db=DEFAULT_TGC_MAX_DB):
+    """Interpolate dB control points into a full-depth TGC dB curve."""
     points = default_tgc_control_points() if ctrl_points is None else np.asarray(ctrl_points, dtype=np.float32)
     if points.ndim != 2 or points.shape[1] != 2:
         raise ValueError("TGC control points must be an Nx2 array")
     xs = np.clip(points[:, 0], 0, num_samples - 1)
-    ys = np.clip(points[:, 1], 0.0, float(max_gain))
+    ys = np.clip(points[:, 1], float(min_db), float(max_db))
     order = np.argsort(xs)
     xs = xs[order]
     ys = ys[order]
@@ -99,14 +113,34 @@ def make_tgc_gain(ctrl_points=None, num_samples=DEFAULT_RF_DEPTH, max_gain=DEFAU
     return np.interp(xq, xs, ys).astype(np.float32)
 
 
-def apply_tgc_gain(img_log, tgc_gain, enable_tgc=True):
-    """Apply vectorized depth-wise TGC multiplication to polar log data."""
+def make_tgc_gain(ctrl_points=None, num_samples=DEFAULT_RF_DEPTH, min_db=DEFAULT_TGC_MIN_DB, max_db=DEFAULT_TGC_MAX_DB):
+    """Interpolate dB control points and convert them into linear TGC gain."""
+    return tgc_db_to_gain(make_tgc_db_curve(ctrl_points, num_samples, min_db, max_db))
+
+
+def q214_to_log10_float(rfdata_q214):
+    """Convert FPGA Q2.14 log10 samples into normal float32 log10 values."""
+    return rfdata_q214.astype(np.float32, copy=False) / float(2 ** DEFAULT_LOG10_FRAC_BITS)
+
+
+def apply_tgc_gain_log10_q214(rfdata_q214, tgc_gain, enable_tgc=True):
+    """Convert Q2.14 log10 data to float log10 and apply depth-wise TGC.
+
+    The requested linear-domain operation is:
+        log10((10 ** log10_data) * tgc_gain)
+    which is equivalent to:
+        log10_data + log10(tgc_gain)
+    This keeps the per-frame work vectorized and avoids a costly exp/log round trip.
+    """
+    log10_data = q214_to_log10_float(rfdata_q214)
     if not enable_tgc:
-        return img_log
+        return log10_data
+
     gain = np.asarray(tgc_gain, dtype=np.float32).reshape(-1)
-    if gain.size != img_log.shape[1]:
-        raise ValueError(f"TGC gain length must be {img_log.shape[1]}, got {gain.size}")
-    return img_log * gain[np.newaxis, :]
+    if gain.size != log10_data.shape[1]:
+        raise ValueError(f"TGC gain length must be {log10_data.shape[1]}, got {gain.size}")
+    safe_gain = np.clip(gain, DEFAULT_TGC_MIN_GAIN, DEFAULT_TGC_MAX_GAIN)
+    return log10_data + np.log10(safe_gain)[np.newaxis, :]
 
 
 def load_graymap_lut(path=None):
@@ -246,15 +280,15 @@ def scan_convert_bilinear(polar_data, scan):
     return out.reshape(scan["shape"])
 
 
-def apply_bmode_mapping(cart_data, params, graymap_lut):
-    """MATLAB ultrasound_bmode_gui_graymap.m display mapping."""
+def apply_bmode_mapping(cart_log10_data, params, graymap_lut):
+    """MATLAB ultrasound_bmode_gui_graymap.m display mapping for float log10 data."""
     dynamic_range_db, brightness_db, contrast_gain, noise_floor_db = params
     dynamic_range_db = max(1.0, float(dynamic_range_db))
     brightness_db = float(brightness_db)
     contrast_gain = float(contrast_gain)
     noise_floor_db = float(noise_floor_db)
 
-    cart_log10 = cart_data.astype(np.float32, copy=False) / float(2 ** DEFAULT_LOG10_FRAC_BITS)
+    cart_log10 = cart_log10_data.astype(np.float32, copy=False)
     finite = np.isfinite(cart_log10)
     if np.any(finite):
         cart_log10_max = np.max(cart_log10[finite])
@@ -434,10 +468,12 @@ def data_worker(data_queue, img_queue, stop_flag, bmode_params, graymap_lut, pau
         except Exception:
             continue
         
-        polar_log = rfdata.astype(np.float32, copy=False)
-        if read_shared_tgc_enabled(enable_tgc):
-            polar_log = apply_tgc_gain(polar_log, read_shared_tgc_gain(tgc_gain), True)
-        cart_data = scan_convert_bilinear(polar_log, scan)
+        polar_log10 = apply_tgc_gain_log10_q214(
+            rfdata,
+            read_shared_tgc_gain(tgc_gain),
+            read_shared_tgc_enabled(enable_tgc),
+        )
+        cart_log10 = scan_convert_bilinear(polar_log10, scan)
 
         # max_signal = np.max(bimg)
         # bimg_norm = bimg / max_signal
@@ -454,7 +490,7 @@ def data_worker(data_queue, img_queue, stop_flag, bmode_params, graymap_lut, pau
 
         params = read_shared_bmode_params(bmode_params)
         lut = read_shared_lut(graymap_lut)
-        img_queue.put(apply_bmode_mapping(cart_data, params, lut))
+        img_queue.put(apply_bmode_mapping(cart_log10, params, lut))
 
     print("[GPU Worker] Stop.")
 
