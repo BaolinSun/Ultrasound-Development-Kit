@@ -106,6 +106,6 @@ function delay_vec = cal_phased_array_transmit_delay(probe_geometry_vectors, foc
 fp = focus_point(:)';
 diff = probe_geometry_vectors - fp;
 L = sqrt(sum(diff .^ 2, 2));
-% delay_vec = 5e-6 - (L - F) / c;
-delay_vec = (max(L) - L) / c;
+delay_vec = 5e-6 - (L - F) / c;
+% delay_vec = (max(L) - L) / c;
 end
