@@ -43,9 +43,9 @@ except ImportError:
 from ultrasound_pipeline_adapter import UltrasoundPipeline
 
 
-EXTERNAL_PS_TOOLS_DIR = Path(r"D:\MyProjects\zynq_prj\ultrasound_focus_B_mode_imaging\tools")
-EXTERNAL_PS_CONFIG_GUI = EXTERNAL_PS_TOOLS_DIR / "ultrasound_config_gui.py"
-EXTERNAL_PS_UART_TOOL = EXTERNAL_PS_TOOLS_DIR / "ultrasound_config_uart.py"
+PS_TOOLS_DIR = Path(__file__).resolve().parent
+PS_CONFIG_GUI = PS_TOOLS_DIR / "ultrasound_config_gui.py"
+PS_UART_TOOL = PS_TOOLS_DIR / "ultrasound_config_uart.py"
 TGC_MIN_DB = -24.0
 TGC_MAX_DB = 24.0
 PS_UART_TARGETS = [
@@ -1292,8 +1292,8 @@ class UltrasoundMainWindow(QMainWindow):
 
         port = self.ps_port_combo.currentText().strip() or "COM3"
         target = self.ps_target_combo.currentText().strip() or "afe5832"
-        if not EXTERNAL_PS_UART_TOOL.exists():
-            self.ps_uart_output.setPlainText(f"Missing external UART config tool: {EXTERNAL_PS_UART_TOOL}\n")
+        if not PS_UART_TOOL.exists():
+            self.ps_uart_output.setPlainText(f"Missing UART config tool: {PS_UART_TOOL}\n")
             return
 
         self.ps_uart_output.clear()
@@ -1302,8 +1302,8 @@ class UltrasoundMainWindow(QMainWindow):
 
         process = QProcess(self)
         process.setProgram(sys.executable)
-        process.setArguments(["-u", str(EXTERNAL_PS_UART_TOOL), "--port", port, "--target", target])
-        process.setWorkingDirectory(str(EXTERNAL_PS_TOOLS_DIR))
+        process.setArguments(["-u", str(PS_UART_TOOL), "--port", port, "--target", target])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
         process.readyReadStandardOutput.connect(self._read_ps_uart_stdout)
         process.readyReadStandardError.connect(self._read_ps_uart_stderr)
         process.finished.connect(self._ps_uart_finished)
@@ -1318,14 +1318,14 @@ class UltrasoundMainWindow(QMainWindow):
         ):
             self._append_ps_uart_output("Advanced PS config GUI is already running.\n")
             return
-        if not EXTERNAL_PS_CONFIG_GUI.exists():
-            self._append_ps_uart_output(f"Missing advanced PS config GUI: {EXTERNAL_PS_CONFIG_GUI}\n")
+        if not PS_CONFIG_GUI.exists():
+            self._append_ps_uart_output(f"Missing advanced PS config GUI: {PS_CONFIG_GUI}\n")
             return
 
         process = QProcess(self)
         process.setProgram(sys.executable)
-        process.setArguments([str(EXTERNAL_PS_CONFIG_GUI)])
-        process.setWorkingDirectory(str(EXTERNAL_PS_TOOLS_DIR))
+        process.setArguments([str(PS_CONFIG_GUI)])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
         process.readyReadStandardOutput.connect(self._read_advanced_ps_stdout)
         process.readyReadStandardError.connect(self._read_advanced_ps_stderr)
         process.finished.connect(self._advanced_ps_finished)
@@ -1333,9 +1333,9 @@ class UltrasoundMainWindow(QMainWindow):
         self.ps_advanced_config_process = process
         process.start()
         if process.waitForStarted(1000):
-            self._append_ps_uart_output(f"Launched advanced PS config GUI: {EXTERNAL_PS_CONFIG_GUI}\n")
+            self._append_ps_uart_output(f"Launched advanced PS config GUI: {PS_CONFIG_GUI}\n")
         else:
-            self._append_ps_uart_output(f"Failed to launch advanced PS config GUI: {EXTERNAL_PS_CONFIG_GUI}\n")
+            self._append_ps_uart_output(f"Failed to launch advanced PS config GUI: {PS_CONFIG_GUI}\n")
             self.ps_advanced_config_process = None
 
     def _read_ps_uart_stdout(self):
@@ -1370,8 +1370,8 @@ class UltrasoundMainWindow(QMainWindow):
         if self.ps_beam_process and self.ps_beam_process.state() != QProcess.ProcessState.NotRunning:
             self._append_ps_uart_output(f"Beam {operation} skipped: previous beam command is still running.\n")
             return
-        if not EXTERNAL_PS_UART_TOOL.exists():
-            self._append_ps_uart_output(f"Missing external UART config tool: {EXTERNAL_PS_UART_TOOL}\n")
+        if not PS_UART_TOOL.exists():
+            self._append_ps_uart_output(f"Missing UART config tool: {PS_UART_TOOL}\n")
             return
 
         port = self.ps_port_combo.currentText().strip() or "COM3"
@@ -1379,8 +1379,8 @@ class UltrasoundMainWindow(QMainWindow):
 
         process = QProcess(self)
         process.setProgram(sys.executable)
-        process.setArguments(["-u", str(EXTERNAL_PS_UART_TOOL), "--port", port, "--beam", operation])
-        process.setWorkingDirectory(str(EXTERNAL_PS_TOOLS_DIR))
+        process.setArguments(["-u", str(PS_UART_TOOL), "--port", port, "--beam", operation])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
         process.readyReadStandardOutput.connect(self._read_beam_stdout)
         process.readyReadStandardError.connect(self._read_beam_stderr)
         process.finished.connect(self._beam_finished)
