@@ -18,29 +18,25 @@
       ]
     },
     "dtgc": {
-      "profiles": [
-        {
-          "profile": 0,
-          "start_gain": 16,
-          "stop_gain": 144,
-          "pos_step": 0,
-          "pos_step_feq": 3,
-          "neg_step": 31,
-          "neg_step_feq": 7
-        }
-      ],
-      "_source": "Matches afe5832.c lines 172-180: start_gain=16, stop_gain=144, pos_step=0, pos_step_feq=3, neg_step=31, neg_step_feq=7.",
-      "raw_registers": [
-        { "addr": "0xB5", "data": "0x011F" },
-        { "addr": "0xB6", "data": "0x4800" }
-      ]
+      "adc_clk_hz": 50000000.0,
+      "sound_speed": 1540.0,
+      "lna_gain_db": 21,
+      "pga_gain_db": 27,
+      "dtgc_start_depth_cm": 1.5,
+      "max_gain_depth_cm": 10.0,
+      "ramp_down_depth_cm": 14.0,
+      "start_gain_code": 128,
+      "stop_gain_code": 144,
+      "pos_step_code": 1,
+      "neg_step_code": 255,
+      "slope_fac": 2,
+      "mem_bank": 0
     },
     "raw_registers": [
       { "map": "ADC", "addr": "0x01", "data": "0x0000" },
       { "map": "ADC", "addr": "0x03", "data": "0x3010" },
       { "map": "ADC", "addr": "0x0D", "data": "0xF800" },
       { "map": "ADC", "addr": "0x0E", "data": "0xF800" },
-      { "map": "ADC", "addr": "0x0D", "data": "0xF800" },
       { "map": "ADC", "addr": "0x0F", "data": "0xF800" },
       { "map": "ADC", "addr": "0x10", "data": "0xF800" },
       { "map": "ADC", "addr": "0x11", "data": "0xF800" },
