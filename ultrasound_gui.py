@@ -46,6 +46,7 @@ from ultrasound_pipeline_adapter import UltrasoundPipeline
 PS_TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 PS_CONFIG_GUI = PS_TOOLS_DIR / "ultrasound_config_gui.py"
 PS_UART_TOOL = PS_TOOLS_DIR / "ultrasound_config_uart.py"
+PS_USB_TOOL = PS_TOOLS_DIR / "ultrasound_config_usb.py"
 TGC_MIN_DB = -24.0
 TGC_MAX_DB = 24.0
 PS_UART_TARGETS = [
@@ -683,6 +684,10 @@ class UltrasoundMainWindow(QMainWindow):
         self._normal_geometry = None
         self._restore_custom_maximized_after_fullscreen = False
         self._cleanup_started = False
+        self._usb_config_in_progress = False
+        self._usb_config_restart_after_finish = False
+        self._usb_config_restore_paused = False
+        self._usb_config_saved_bmode_values = None
 
         self.setWindowTitle("UltraVision Workstation")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
@@ -778,6 +783,7 @@ class UltrasoundMainWindow(QMainWindow):
 
         side_layout.addWidget(self._make_controls_panel())
         side_layout.addWidget(self._make_ps_uart_config_panel())
+        side_layout.addWidget(self._make_ps_usb_config_panel())
         side_layout.addWidget(self._make_tgc_panel())
         side_layout.addWidget(self._make_graymap_panel())
         side_layout.addWidget(self._make_imaging_panel())
@@ -954,6 +960,48 @@ class UltrasoundMainWindow(QMainWindow):
         self._refresh_serial_ports()
         return panel
 
+    def _make_ps_usb_config_panel(self):
+        panel = QFrame()
+        panel.setObjectName("Panel")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(14, 14, 14, 14)
+        layout.setSpacing(10)
+
+        heading = QLabel("PS USB Config")
+        heading.setObjectName("PanelHeading")
+
+        self.ps_usb_target_combo = QComboBox()
+        self.ps_usb_target_combo.addItems(PS_UART_TARGETS)
+        self.ps_usb_target_combo.setCurrentText("afe5832")
+
+        vid_pid_label = QLabel("0x0424 / 0x4940")
+        vid_pid_label.setObjectName("ParamValue")
+        endpoint_label = QLabel("OUT 0x01 / IN 0x81")
+        endpoint_label.setObjectName("ParamValue")
+
+        self.ps_usb_config_button = QPushButton("Configure PS via USB")
+        self.ps_usb_config_button.setObjectName("PrimaryButton")
+
+        output_label = QLabel("USB Reply")
+        output_label.setObjectName("ParamName")
+        self.ps_usb_output = QPlainTextEdit()
+        self.ps_usb_output.setObjectName("SerialOutput")
+        self.ps_usb_output.setReadOnly(True)
+        self.ps_usb_output.setMaximumBlockCount(500)
+        self.ps_usb_output.setFixedHeight(92)
+
+        layout.addWidget(heading)
+        layout.addWidget(self._label_value_row("Target", self.ps_usb_target_combo))
+        layout.addWidget(self._label_value_row("VID/PID", vid_pid_label))
+        layout.addWidget(self._label_value_row("Endpoint", endpoint_label))
+        layout.addWidget(self.ps_usb_config_button)
+        layout.addWidget(output_label)
+        layout.addWidget(self.ps_usb_output)
+
+        self.ps_usb_config_process = None
+        self.ps_usb_beam_process = None
+        return panel
+
     def _make_imaging_panel(self):
         self.imaging_labels = {
             "depth": QLabel("--"),
@@ -1124,6 +1172,7 @@ class UltrasoundMainWindow(QMainWindow):
         self.ps_refresh_button.clicked.connect(self._refresh_serial_ports)
         self.ps_config_button.clicked.connect(self._start_ps_uart_config)
         self.ps_advanced_config_button.clicked.connect(self._open_advanced_ps_config)
+        self.ps_usb_config_button.clicked.connect(self._start_ps_usb_config)
         self.tgc_enable_checkbox.toggled.connect(self._tgc_enabled_changed)
         self.tgc_reset_button.clicked.connect(self._reset_tgc)
         self.tgc_save_button.clicked.connect(self._save_tgc)
@@ -1259,6 +1308,13 @@ class UltrasoundMainWindow(QMainWindow):
         self.ps_uart_output.insertPlainText(text)
         self.ps_uart_output.moveCursor(QTextCursor.MoveOperation.End)
 
+    def _append_ps_usb_output(self, text):
+        if not text:
+            return
+        self.ps_usb_output.moveCursor(QTextCursor.MoveOperation.End)
+        self.ps_usb_output.insertPlainText(text)
+        self.ps_usb_output.moveCursor(QTextCursor.MoveOperation.End)
+
     def _refresh_serial_ports(self):
         current = self.ps_port_combo.currentText().strip() if self.ps_port_combo.count() else ""
         ports = []
@@ -1366,27 +1422,177 @@ class UltrasoundMainWindow(QMainWindow):
         if self.ps_config_process and self.ps_config_process.state() == QProcess.ProcessState.NotRunning:
             self.ps_config_process = None
 
-    def _start_beam_control(self, operation):
-        if self.ps_beam_process and self.ps_beam_process.state() != QProcess.ProcessState.NotRunning:
-            self._append_ps_uart_output(f"Beam {operation} skipped: previous beam command is still running.\n")
-            return
-        if not PS_UART_TOOL.exists():
-            self._append_ps_uart_output(f"Missing UART config tool: {PS_UART_TOOL}\n")
+    def _start_ps_usb_config(self):
+        if self.ps_usb_config_process and self.ps_usb_config_process.state() != QProcess.ProcessState.NotRunning:
+            self._append_ps_usb_output("USB configuration is already running.\n")
             return
 
-        port = self.ps_port_combo.currentText().strip() or "COM3"
-        self._append_ps_uart_output(f"\nBeam {operation.upper()} via {port}\n")
+        target = self.ps_usb_target_combo.currentText().strip() or "afe5832"
+        if not PS_USB_TOOL.exists():
+            self.ps_usb_output.setPlainText(f"Missing USB config tool: {PS_USB_TOOL}\n")
+            return
+
+        self.ps_usb_output.clear()
+        self._append_ps_usb_output(
+            "Transport: USB\nVID/PID: 0x0424 / 0x4940\nEndpoint: OUT 0x01 / IN 0x81\n"
+            f"Target: {target}\n\n"
+        )
+        self._prepare_ps_usb_config_session()
+        self.ps_usb_config_button.setEnabled(False)
 
         process = QProcess(self)
         process.setProgram(sys.executable)
-        process.setArguments(["-u", str(PS_UART_TOOL), "--port", port, "--beam", operation])
+        process.setArguments(["-u", str(PS_USB_TOOL), "--target", target])
         process.setWorkingDirectory(str(PS_TOOLS_DIR))
-        process.readyReadStandardOutput.connect(self._read_beam_stdout)
-        process.readyReadStandardError.connect(self._read_beam_stderr)
-        process.finished.connect(self._beam_finished)
-        process.errorOccurred.connect(self._beam_process_error)
-        self.ps_beam_process = process
+        process.readyReadStandardOutput.connect(self._read_ps_usb_stdout)
+        process.readyReadStandardError.connect(self._read_ps_usb_stderr)
+        process.finished.connect(self._ps_usb_finished)
+        process.errorOccurred.connect(self._ps_usb_process_error)
+        self.ps_usb_config_process = process
         process.start()
+
+    def _prepare_ps_usb_config_session(self):
+        self._usb_config_in_progress = True
+        self._usb_config_restart_after_finish = bool(self.pipeline.running)
+        self._usb_config_restore_paused = bool(self._paused)
+        self._usb_config_saved_bmode_values = self._current_bmode_values()
+
+        self.start_stop_button.setEnabled(False)
+        self.freeze_button.setEnabled(False)
+
+        if not self._usb_config_restart_after_finish:
+            return
+
+        self._append_ps_usb_output("Stopping live acquisition to release USB device...\n")
+        self.pipeline.stop()
+        self._paused = False
+        self.freeze_button.setText("FREEZE")
+        self.fps_label.setText("FPS 0.0")
+        self._update_fps(0.0)
+        self._append_ps_usb_output("USB acquisition stopped. Starting PS USB configuration...\n\n")
+
+    def _finish_ps_usb_config_session(self):
+        if self._cleanup_started:
+            self._usb_config_in_progress = False
+            self._usb_config_restart_after_finish = False
+            self._usb_config_restore_paused = False
+            self._usb_config_saved_bmode_values = None
+            return
+
+        if not self._usb_config_in_progress:
+            self.ps_usb_config_button.setEnabled(True)
+            self.start_stop_button.setEnabled(True)
+            return
+
+        restart = self._usb_config_restart_after_finish
+        restore_paused = self._usb_config_restore_paused
+        bmode_values = self._usb_config_saved_bmode_values or self._current_bmode_values()
+
+        self._usb_config_in_progress = False
+        self._usb_config_restart_after_finish = False
+        self._usb_config_restore_paused = False
+        self._usb_config_saved_bmode_values = None
+
+        self.ps_usb_config_button.setEnabled(True)
+        self.start_stop_button.setEnabled(True)
+
+        if not restart:
+            self.freeze_button.setEnabled(False)
+            return
+
+        self._append_ps_usb_output("\nRestarting live acquisition...\n")
+        self._paused = False
+        self.freeze_button.setText("FREEZE")
+        self.pipeline.start(bmode_values)
+
+        if restore_paused and self.pipeline.running:
+            self._paused = True
+            self.pipeline.pause(True)
+            self.freeze_button.setText("RESUME")
+
+        self._append_ps_usb_output("Acquisition restored.\n")
+
+    def _read_ps_usb_stdout(self):
+        if not self.ps_usb_config_process:
+            return
+        data = bytes(self.ps_usb_config_process.readAllStandardOutput()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _read_ps_usb_stderr(self):
+        if not self.ps_usb_config_process:
+            return
+        data = bytes(self.ps_usb_config_process.readAllStandardError()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _ps_usb_finished(self, exit_code, exit_status):
+        self._read_ps_usb_stdout()
+        self._read_ps_usb_stderr()
+        if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit:
+            self._append_ps_usb_output("\nUSB configuration finished.\n")
+        else:
+            self._append_ps_usb_output(f"\nUSB configuration failed, exit code {exit_code}.\n")
+        self.ps_usb_config_process = None
+        self._finish_ps_usb_config_session()
+
+    def _ps_usb_process_error(self, error):
+        self._append_ps_usb_output(f"\nUSB QProcess error: {error}\n")
+        failed_to_start = error == QProcess.ProcessError.FailedToStart
+        if (
+            failed_to_start
+            or (
+                self.ps_usb_config_process
+                and self.ps_usb_config_process.state() == QProcess.ProcessState.NotRunning
+            )
+        ):
+            self.ps_usb_config_process = None
+            self._finish_ps_usb_config_session()
+
+    def _start_beam_control(self, operation):
+        if self.ps_usb_beam_process and self.ps_usb_beam_process.state() != QProcess.ProcessState.NotRunning:
+            self._append_ps_usb_output(f"Beam {operation} skipped: previous USB beam command is still running.\n")
+            return
+        if not PS_USB_TOOL.exists():
+            self._append_ps_usb_output(f"Missing USB config tool: {PS_USB_TOOL}\n")
+            return
+
+        self._append_ps_usb_output(f"\nBeam {operation.upper()} via USB\n")
+
+        process = QProcess(self)
+        process.setProgram(sys.executable)
+        process.setArguments(["-u", str(PS_USB_TOOL), "--beam", operation])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
+        process.readyReadStandardOutput.connect(self._read_usb_beam_stdout)
+        process.readyReadStandardError.connect(self._read_usb_beam_stderr)
+        process.finished.connect(self._usb_beam_finished)
+        process.errorOccurred.connect(self._usb_beam_process_error)
+        self.ps_usb_beam_process = process
+        process.start()
+
+    def _read_usb_beam_stdout(self):
+        if not self.ps_usb_beam_process:
+            return
+        data = bytes(self.ps_usb_beam_process.readAllStandardOutput()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _read_usb_beam_stderr(self):
+        if not self.ps_usb_beam_process:
+            return
+        data = bytes(self.ps_usb_beam_process.readAllStandardError()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _usb_beam_finished(self, exit_code, exit_status):
+        self._read_usb_beam_stdout()
+        self._read_usb_beam_stderr()
+        if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit:
+            self._append_ps_usb_output("USB beam command finished.\n")
+        else:
+            self._append_ps_usb_output(f"USB beam command failed, exit code {exit_code}.\n")
+        self.ps_usb_beam_process = None
+
+    def _usb_beam_process_error(self, error):
+        self._append_ps_usb_output(f"USB beam QProcess error: {error}\n")
+        if self.ps_usb_beam_process and self.ps_usb_beam_process.state() == QProcess.ProcessState.NotRunning:
+            self.ps_usb_beam_process = None
 
     def _read_beam_stdout(self):
         if not self.ps_beam_process:
@@ -2065,6 +2271,8 @@ class UltrasoundMainWindow(QMainWindow):
         self._terminate_qprocess("ps_config_process")
         self._terminate_qprocess("ps_beam_process")
         self._terminate_qprocess("ps_advanced_config_process")
+        self._terminate_qprocess("ps_usb_config_process")
+        self._terminate_qprocess("ps_usb_beam_process")
         self.pipeline.stop()
 
     def closeEvent(self, event):
