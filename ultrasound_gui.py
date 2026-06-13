@@ -43,7 +43,7 @@ except ImportError:
 from ultrasound_pipeline_adapter import UltrasoundPipeline
 
 
-PS_TOOLS_DIR = Path(__file__).resolve().parent
+PS_TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 PS_CONFIG_GUI = PS_TOOLS_DIR / "ultrasound_config_gui.py"
 PS_UART_TOOL = PS_TOOLS_DIR / "ultrasound_config_uart.py"
 TGC_MIN_DB = -24.0
