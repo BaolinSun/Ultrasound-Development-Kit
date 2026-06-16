@@ -1,154 +1,183 @@
-import matplotlib.pyplot as plt
+import argparse
+from pathlib import Path
+
 import numpy as np
-from matplotlib.animation import FuncAnimation
+import pandas as pd
+import matplotlib.pyplot as plt
 
 
-WORDS_PER_CH = 4096
-RTC_LINES = 128
-CH_PER_RTC_LINE = 32
-FRAME_WORDS = RTC_LINES * CH_PER_RTC_LINE * WORDS_PER_CH
+DEFAULT_DATA_DIR = Path(r"D:\MyProjects\py_prj\py_test\log\rfdata")
+DEFAULT_FS = 25e6
+NUM_LINES = 64
+NUM_CHANNELS = 64
+NUM_SAMPLES = 4096
 
 
-def hex_to_signed_int(hex_str, bits=16):
-    """将16进制补码转换为有符号整数"""
-    val = int(hex_str, 16)
-    if val & (1 << (bits - 1)):
-        val -= 1 << bits
-    return val
+def load_rfdata(data_dir):
+    """Load rfdata_1.csv..rfdata_64.csv as a (line, sample, channel) cube."""
+    data_dir = Path(data_dir)
+    if not data_dir.exists():
+        raise FileNotFoundError(f"RF data directory not found: {data_dir}")
+    if not data_dir.is_dir():
+        raise NotADirectoryError(f"RF data path is not a directory: {data_dir}")
 
-def convert_result_to_numpy(result):
-    num_lines = 64
-    num_channels = 64
-    numpy_array = np.zeros((num_lines, num_channels, 4096), dtype=np.int16)
-    for i in range(num_lines):
-        for j in range(num_channels):
-            numpy_array[i, j, :4093] = result[i][j]
-            numpy_array[i, j, 4093:] = result[i][j][4090:]
-    return numpy_array
+    lines = []
+    for line_idx in range(NUM_LINES):
+        csv_path = data_dir / f"rfdata_{line_idx + 1}.csv"
+        if not csv_path.exists():
+            raise FileNotFoundError(f"Missing RF CSV for line {line_idx}: {csv_path}")
 
-
-def find_frame_start(lines):
-
-    n = len(lines)
-
-    for i in range(n):
-        if lines[i].upper() != "A55A":
-            continue
-
-        rtc_line = int(lines[(i + 1) % n], 16)
-        channel_id = int(lines[(i + 2) % n], 16)
-
-        if rtc_line == 0 and channel_id == 0:
-            return i
-
-    raise RuntimeError("未找到帧头 A55A 0000 0000,请确认DDR dump中包含完整RF帧")
-
-
-def circular_get(lines, start, offset):
-    return lines[(start + offset) % len(lines)]
-
-
-def process_ultrasound_sa_data(file_path):
-    # 结构: {rtc_line: {channel_id: [data]}}
-    raw_data = {}
-
-    with open(file_path, "r") as f:
-        lines = [line.strip().upper() for line in f if line.strip()]
-
-    if len(lines) < FRAME_WORDS:
-        raise RuntimeError(
-            f"文件word数不足: {len(lines)}, 期望至少 {FRAME_WORDS}"
-        )
-
-    frame_start = find_frame_start(lines)
-    print(f"环形帧头位置 word index = {frame_start}, byte offset = 0x{frame_start * 2:08X}")
-
-    for block_idx in range(RTC_LINES * CH_PER_RTC_LINE):
-        base = block_idx * WORDS_PER_CH
-
-        magic = circular_get(lines, frame_start, base)
-        rtc_line = int(circular_get(lines, frame_start, base + 1), 16)
-        channel_id = int(circular_get(lines, frame_start, base + 2), 16)
-
-        if magic != "A55A":
-            raise RuntimeError(
-                f"通道包头错误: block={block_idx}, "
-                f"offset={base}, got={magic}, "
-                f"rtc_line={rtc_line}, ch={channel_id}"
+        data = pd.read_csv(csv_path, header=None).to_numpy(dtype=np.int32)
+        if data.shape != (NUM_SAMPLES, NUM_CHANNELS):
+            raise ValueError(
+                f"Bad shape for {csv_path}: got {data.shape}, "
+                f"expected {(NUM_SAMPLES, NUM_CHANNELS)}"
             )
+        lines.append(data)
 
-        samples = [
-            hex_to_signed_int(circular_get(lines, frame_start, base + k))
-            for k in range(3, WORDS_PER_CH)
-        ]
-
-        raw_data.setdefault(rtc_line, {})[channel_id] = samples
-
-    # 合成孔径合并: {logical_focus_line: {channel_id: [data]}}
-    rfdata = {}
-
-    for rtc in range(0, RTC_LINES, 2):
-        logical_line = rtc // 2
-        rfdata[logical_line] = {}
-
-        if rtc in raw_data:
-            rfdata[logical_line].update(raw_data[rtc])
-
-        if rtc + 1 in raw_data:
-            rfdata[logical_line].update(raw_data[rtc + 1])
-
-    return rfdata
+    return np.stack(lines, axis=0)
 
 
-# 执行解析
-rfdata = process_ultrasound_sa_data("log\\output.txt")
+def compute_spectrum(signal, fs=DEFAULT_FS):
+    """Compute a raw unwindowed relative spectrum in dB."""
+    signal = np.asarray(signal, dtype=np.float64).reshape(-1)
+    if signal.size == 0:
+        raise ValueError("signal must not be empty")
+
+    spectrum = np.fft.rfft(signal)
+    mag = np.abs(spectrum)
+
+    eps = np.finfo(np.float64).eps
+    ref = max(float(np.max(mag)), eps)
+    mag_db = 20.0 * np.log10(np.maximum(mag, eps) / ref)
+    freq_mhz = np.fft.rfftfreq(signal.size, d=1.0 / fs) / 1e6
+    return freq_mhz, mag_db
 
 
-for line_idx in sorted(rfdata.keys()):
-    channels = sorted(rfdata[line_idx].keys())
-    if len(channels) != 64:
-        raise RuntimeError(
-            f"警告: 聚焦线 {line_idx} 包含通道数 {len(channels)}, "
-            f"未达到预期的64通道 (通道范围 {min(channels)}-{max(channels)})"
+def compute_average_spectrum(rf_data, fs=DEFAULT_FS):
+    """Average magnitude spectra over all focus lines and channels."""
+    rf_data = np.asarray(rf_data)
+    if rf_data.shape != (NUM_LINES, NUM_SAMPLES, NUM_CHANNELS):
+        raise ValueError(
+            f"rf_data shape must be {(NUM_LINES, NUM_SAMPLES, NUM_CHANNELS)}, "
+            f"got {rf_data.shape}"
         )
 
+    mag_sum = None
+    trace_count = 0
 
-plt.figure(figsize=(10, 8))
+    for line_data in rf_data:
+        data = line_data.astype(np.float64)
+        mag = np.abs(np.fft.rfft(data, axis=0))
+        line_mag_sum = np.sum(mag, axis=1)
+        mag_sum = line_mag_sum if mag_sum is None else mag_sum + line_mag_sum
+        trace_count += data.shape[1]
 
-plt.subplot(3, 1, 1)
-plt.plot(rfdata[36][31])
-
-plt.subplot(3, 1, 2)
-plt.plot(rfdata[36][32])
-
-plt.subplot(3, 1, 3)
-plt.plot(rfdata[36][33])
-
-plt.tight_layout()
-plt.show()
-
-# data = convert_result_to_numpy(rfdata)
-# data = 20 * np.log10(np.abs(data) + 1e-10)  # 转换为dB，避免log(0)导致的负无穷
+    avg_mag = mag_sum / trace_count
+    eps = np.finfo(np.float64).eps
+    ref = max(float(np.max(avg_mag)), eps)
+    avg_mag_db = 20.0 * np.log10(np.maximum(avg_mag, eps) / ref)
+    freq_mhz = np.fft.rfftfreq(NUM_SAMPLES, d=1.0 / fs) / 1e6
+    return freq_mhz, avg_mag_db
 
 
-# fig, ax = plt.subplots()
-# im = ax.imshow(data[0].T, aspect='auto')
-# ax.set_title("Frame 0")
-# plt.colorbar(im)
+def find_peak(freq_mhz, mag_db, min_freq_mhz=0.1):
+    """Find the peak frequency, ignoring near-DC bins by default."""
+    freq_mhz = np.asarray(freq_mhz)
+    mag_db = np.asarray(mag_db)
+    valid = freq_mhz >= min_freq_mhz
+    if not np.any(valid):
+        idx = int(np.argmax(mag_db))
+    else:
+        local_idx = int(np.argmax(mag_db[valid]))
+        idx = int(np.flatnonzero(valid)[local_idx])
+    return float(freq_mhz[idx]), float(mag_db[idx])
 
-# def update(frame):
-#     # 更新图像数据
-#     im.set_array(data[frame].T)
 
-#     vmin = np.min(data[frame])
-#     vmax = np.max(data[frame])
-#     im.set_clim(vmin, vmax)
+def plot_rf_analysis(rf_data, line_idx, channel_idx, fs, save_fig=None, no_show=False):
+    """Plot selected RF waveform, selected spectrum, and all-data average spectrum."""
+    signal = rf_data[line_idx, :, channel_idx]
+    time_us = np.arange(NUM_SAMPLES) / fs * 1e6
 
-#     # 更新标题
-#     ax.set_title(f"Frame {frame} / 64 | | Range: [{vmin:.1f}, {vmax:.1f}] dB")
-#     return [im]
+    freq_mhz, mag_db = compute_spectrum(signal, fs)
+    avg_freq_mhz, avg_mag_db = compute_average_spectrum(rf_data, fs)
 
-# ani = FuncAnimation(fig, update, frames=64, interval=10)
-# # ani.save('line_animation.gif', writer='pillow', fps=8)
-# plt.tight_layout()
-# plt.show()
+    peak_freq, peak_mag = find_peak(freq_mhz, mag_db)
+    avg_peak_freq, avg_peak_mag = find_peak(avg_freq_mhz, avg_mag_db)
+
+    fig, axes = plt.subplots(3, 1, figsize=(12, 10), constrained_layout=True)
+
+    axes[0].plot(time_us, signal, linewidth=0.9)
+    axes[0].set_title(f"RF waveform: line {line_idx}, channel {channel_idx}")
+    axes[0].set_xlabel("Time (us)")
+    axes[0].set_ylabel("ADC code")
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(freq_mhz, mag_db, linewidth=0.9)
+    axes[1].set_title(f"Spectrum: peak {peak_freq:.3f} MHz ({peak_mag:.1f} dB)")
+    axes[1].set_xlabel("Frequency (MHz)")
+    axes[1].set_ylabel("Magnitude (dB, relative)")
+    axes[1].set_xlim(0.0, fs / 2.0 / 1e6)
+    axes[1].set_ylim(-100.0, 5.0)
+    axes[1].grid(True, alpha=0.3)
+
+    axes[2].plot(avg_freq_mhz, avg_mag_db, linewidth=0.9)
+    axes[2].set_title(f"Average spectrum: peak {avg_peak_freq:.3f} MHz ({avg_peak_mag:.1f} dB)")
+    axes[2].set_xlabel("Frequency (MHz)")
+    axes[2].set_ylabel("Magnitude (dB, relative)")
+    axes[2].set_xlim(0.0, fs / 2.0 / 1e6)
+    axes[2].set_ylim(-100.0, 5.0)
+    axes[2].grid(True, alpha=0.3)
+
+    if save_fig:
+        save_path = Path(save_fig)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=160)
+        print(f"Saved figure: {save_path}")
+
+    print(f"Selected spectrum peak: {peak_freq:.6f} MHz, {peak_mag:.2f} dB")
+    print(f"Average spectrum peak : {avg_peak_freq:.6f} MHz, {avg_peak_mag:.2f} dB")
+
+    if not no_show:
+        plt.show()
+    else:
+        plt.close(fig)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Analyze raw RF CSV data spectrum.")
+    parser.add_argument("--data-dir", default=str(DEFAULT_DATA_DIR), help="directory containing rfdata_1.csv..rfdata_64.csv")
+    parser.add_argument("--line", type=int, default=0, help="logical focus line index, 0..63")
+    parser.add_argument("--channel", type=int, default=0, help="channel index, 0..63")
+    parser.add_argument("--fs", type=float, default=DEFAULT_FS, help="sampling rate in Hz, default 25e6")
+    parser.add_argument("--save-fig", default=None, help="optional output figure path")
+    parser.add_argument("--no-show", action="store_true", help="do not show plot window")
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+
+    if not 0 <= args.line < NUM_LINES:
+        raise ValueError(f"--line must be 0..{NUM_LINES - 1}, got {args.line}")
+    if not 0 <= args.channel < NUM_CHANNELS:
+        raise ValueError(f"--channel must be 0..{NUM_CHANNELS - 1}, got {args.channel}")
+    if args.fs <= 0:
+        raise ValueError(f"--fs must be positive, got {args.fs}")
+
+    rf_data = load_rfdata(args.data_dir)
+    print(f"Loaded RF cube: {rf_data.shape} from {Path(args.data_dir)}")
+    print(f"Sampling rate : {args.fs / 1e6:.3f} MHz")
+
+    plot_rf_analysis(
+        rf_data=rf_data,
+        line_idx=args.line,
+        channel_idx=args.channel,
+        fs=args.fs,
+        save_fig=args.save_fig,
+        no_show=args.no_show,
+    )
+
+
+if __name__ == "__main__":
+    main()

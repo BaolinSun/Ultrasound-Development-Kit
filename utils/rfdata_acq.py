@@ -1,4 +1,4 @@
-import argparse
+﻿import argparse
 import os
 
 import usb.core
@@ -151,19 +151,6 @@ def extend_rf_data_to_4096(rf_data):
     return np.concatenate([rf_data, pad_samples], axis=1)
 
 
-def save_channel_csvs(channel_dir, rf_data):
-    """Save each RF channel as one headerless CSV file with 4096 signed samples."""
-    out_dir = os.path.abspath(channel_dir)
-    os.makedirs(out_dir, exist_ok=True)
-
-    rf_data_4096 = extend_rf_data_to_4096(rf_data)
-    for ch in range(TOTAL_CHANNELS):
-        file_path = os.path.join(out_dir, f"rfdata_{ch + 1}.csv")
-        np.savetxt(file_path, rf_data_4096[ch], fmt="%d")
-
-    return out_dir
-
-
 def save_all_focus_lines_merged_csvs(root_dir, words):
     """Save each logical focus line as one 4096 x 64 headerless CSV file."""
     out_root = os.path.abspath(root_dir)
@@ -217,7 +204,7 @@ def acquire_ddr_words():
     return words
 
 
-def usb_reader(data_queue=None, stop_flag=None, focus_line=0, csv_path=None, dump_path=None, channel_dir=None, all_lines=False, plot=False):
+def usb_reader(data_queue=None, stop_flag=None, focus_line=0, csv_path=None, dump_path=None, all_lines_dir=None, plot=False):
     words = acquire_ddr_words()
     print(f"Received data length: {len(words)} words")
 
@@ -227,31 +214,18 @@ def usb_reader(data_queue=None, stop_flag=None, focus_line=0, csv_path=None, dum
     else:
         print("DDR hex dump path not specified; skip saving dump file")
 
-    if all_lines:
-        if not channel_dir:
-            raise ValueError("--all-lines requires --channel-dir <root_dir>")
-
-        saved_files = save_all_focus_lines_merged_csvs(channel_dir, words)
+    if all_lines_dir:
+        saved_files = save_all_focus_lines_merged_csvs(all_lines_dir, words)
         print(
-            f"Saved all logical focus lines to: {os.path.abspath(channel_dir)}\n"
+            f"Saved all logical focus lines to: {os.path.abspath(all_lines_dir)}\n"
             f"  files          = rfdata_1.csv..rfdata_64.csv\n"
             f"  csv shape      = {WORDS_PER_CHANNEL} samples x {TOTAL_CHANNELS} channels\n"
             f"  file count     = {len(saved_files)}"
         )
     else:
-        print("All-lines mode disabled; process only the selected focus line")
+        print("All-lines output directory not specified; skip saving all focus lines")
 
     rf_data, meta = extract_focus_line_rf(words, focus_line)
-
-    if channel_dir and not all_lines:
-        saved_dir = save_channel_csvs(channel_dir, rf_data)
-        print(
-            f"Saved per-channel RF CSV files: {saved_dir}\n"
-            f"  files          = rfdata_1.csv..rfdata_64.csv\n"
-            f"  csv shape      = {WORDS_PER_CHANNEL} samples x 1 channel"
-        )
-    elif not channel_dir:
-        print("Channel CSV directory not specified; skip saving per-channel CSV files")
 
     if csv_path:
         save_focus_line_csv(csv_path, rf_data)
@@ -288,8 +262,7 @@ def parse_args():
     parser.add_argument("--line", type=int, default=0, help="logical focus line index, 0..63")
     parser.add_argument("--csv", default=None, help="output merged CSV path; not saved if omitted")
     parser.add_argument("--dump", default=None, help="output raw DDR hex dump path; not saved if omitted")
-    parser.add_argument("--channel-dir", default=None, help="output directory for channel CSVs, or all-lines merged CSV root; not saved if omitted")
-    parser.add_argument("--all-lines", action="store_true", help="save all 64 logical focus lines under --channel-dir")
+    parser.add_argument("--all-lines", default=None, metavar="ROOT_DIR", help="output directory for all 64 logical focus-line CSV files; not saved if omitted")
     parser.add_argument("--plot", action="store_true", help="plot the extracted 64-channel RF data")
     return parser.parse_args()
 
@@ -300,7 +273,6 @@ if __name__ == "__main__":
         focus_line=args.line,
         csv_path=args.csv,
         dump_path=args.dump,
-        channel_dir=args.channel_dir,
-        all_lines=args.all_lines,
+        all_lines_dir=args.all_lines,
         plot=args.plot,
     )
