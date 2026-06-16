@@ -5,6 +5,7 @@
 !*.m
 !*.bat
 !.gitignore
+!README.md
 
 .vscode/
 __pycache__/
