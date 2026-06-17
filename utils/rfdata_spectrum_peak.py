@@ -5,7 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from rfdata_analysis import (
+from rfdata_analyzer import (
     DEFAULT_DATA_DIR,
     DEFAULT_FS,
     NUM_CHANNELS,
