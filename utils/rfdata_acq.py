@@ -1,5 +1,6 @@
-﻿import argparse
+import argparse
 import os
+import time
 
 import usb.core
 import usb.util
@@ -18,6 +19,13 @@ TOTAL_CHANNELS = 64
 FRAME_WORDS = RTC_LINES * CHANNELS_PER_RTC_LINE * WORDS_PER_CHANNEL
 FRAME_BYTES = FRAME_WORDS * 2
 DEFAULT_DUMP_PATH = None
+USB_FRAME_HEADER = 0xEF
+USB_CFG_REQ_TYPE = 0xC0
+USB_CFG_RESP_TYPE = 0xC1
+USB_EP_OUT = 0x01
+USB_EP_IN = 0x81
+USB_TIMEOUT_MS = 5000
+USB_MAX_RESPONSE_BYTES = 512
 
 
 def byte_to_words(data):
@@ -180,32 +188,103 @@ def save_focus_line_csv(csv_path, rf_data):
     np.savetxt(csv_path, rf_data.T, delimiter=",", fmt="%d", header=header, comments="")
 
 
-def acquire_ddr_words():
+def write_usb_config_command(dev, line, timeout_ms=USB_TIMEOUT_MS):
+    payload = line.encode("ascii")
+    if not payload or len(payload) > 0xFFFF:
+        raise ValueError("USB command payload length is invalid")
+    frame = bytes(
+        (
+            USB_FRAME_HEADER,
+            USB_CFG_REQ_TYPE,
+            len(payload) & 0xFF,
+            (len(payload) >> 8) & 0xFF,
+        )
+    ) + payload
+    dev.write(USB_EP_OUT, frame, timeout=timeout_ms)
+
+
+def read_usb_config_response(dev, timeout_s=5.0, max_response_bytes=USB_MAX_RESPONSE_BYTES):
+    deadline = time.monotonic() + timeout_s
+    last_bad_frame = ""
+
+    while time.monotonic() < deadline:
+        remaining_ms = max(1, int((deadline - time.monotonic()) * 1000))
+        try:
+            raw = bytes(dev.read(USB_EP_IN, max_response_bytes, timeout=remaining_ms))
+        except usb.core.USBTimeoutError:
+            continue
+
+        if len(raw) < 4:
+            last_bad_frame = f"short USB response ({len(raw)} bytes)"
+            continue
+        if raw[0] != USB_FRAME_HEADER or raw[1] != USB_CFG_RESP_TYPE:
+            last_bad_frame = f"non-config USB response: {raw[:8].hex(' ')}"
+            continue
+
+        payload_len = raw[2] | (raw[3] << 8)
+        if payload_len > len(raw) - 4:
+            last_bad_frame = f"truncated USB response: need {payload_len}, got {len(raw) - 4}"
+            continue
+
+        return raw[4 : 4 + payload_len].decode("ascii", errors="replace").strip()
+
+    if last_bad_frame:
+        raise TimeoutError(f"timed out waiting for PS USB acknowledgement ({last_bad_frame})")
+    raise TimeoutError("timed out waiting for PS USB acknowledgement")
+
+
+def send_hv_command(dev, enable, timeout_s=5.0):
+    command = f"HV SET {1 if enable else 0}"
+    write_usb_config_command(dev, command)
+    response = read_usb_config_response(dev, timeout_s=timeout_s)
+
+    if response.startswith("@NACK"):
+        raise RuntimeError(response)
+    if not response.startswith("@ACK ") or " HV_SET" not in response:
+        raise RuntimeError(f"Unexpected HV response: {response}")
+
+    print(f"{command} -> {response}")
+
+
+def acquire_ddr_words(hv_delay_s=3.0):
+    dev = None
     dev = usb.core.find(idVendor=0x0424, idProduct=0x4940)
     if dev is None:
         raise RuntimeError("USB device 0424:4940 not found")
 
-    dev.set_configuration()
-    cfg = dev.get_active_configuration()
-    intf = cfg[(0, 0)]
-    ep = usb.util.find_descriptor(
-        intf,
-        custom_match=lambda e: usb.util.endpoint_direction(e.bEndpointAddress) == usb.util.ENDPOINT_OUT,
-    )
-    print(ep)
+    try:
+        dev.set_configuration()
 
-    ready_data = [0xEF, 0x01, 0x10, 0x00]
-    dev.write(0x1, ready_data, timeout=1000)
+        send_hv_command(dev, True)
+        print(f"Waiting {hv_delay_s:.3f} s for HV to settle")
+        time.sleep(hv_delay_s)
 
-    data = dev.read(0x81, FRAME_BYTES, timeout=5000)
-    words = byte_to_words(data)
+        ready_data = [0xEF, 0x01, 0x10, 0x00]
+        dev.write(USB_EP_OUT, ready_data, timeout=1000)
 
-    usb.util.dispose_resources(dev)
-    return words
+        data = dev.read(USB_EP_IN, FRAME_BYTES, timeout=USB_TIMEOUT_MS)
+        words = byte_to_words(data)
+        return words
+    finally:
+        if dev is not None:
+            try:
+                send_hv_command(dev, False)
+            except Exception as error:
+                print(f"Warning: failed to disable HV over USB: {error}")
+            usb.util.dispose_resources(dev)
 
 
-def usb_reader(data_queue=None, stop_flag=None, focus_line=0, csv_path=None, dump_path=None, all_lines_dir=None, plot=False):
-    words = acquire_ddr_words()
+def usb_reader(
+    data_queue=None,
+    stop_flag=None,
+    focus_line=0,
+    csv_path=None,
+    dump_path=None,
+    all_lines_dir=None,
+    plot=False,
+    hv_delay_s=3.0,
+):
+    words = acquire_ddr_words(hv_delay_s=hv_delay_s)
     print(f"Received data length: {len(words)} words")
 
     if dump_path:
@@ -246,25 +325,36 @@ def usb_reader(data_queue=None, stop_flag=None, focus_line=0, csv_path=None, dum
         )
 
     if plot:
-        for ch in range(TOTAL_CHANNELS):
-            plt.plot(rf_data[ch])
-        plt.ylim(-600, 600)
-        plt.title(f"RF focus line {focus_line}")
-        plt.xlabel("sample")
-        plt.ylabel("ADC code")
-        plt.show()
+        plot_lines = (0, 32, 63)
+        fig, axes = plt.subplots(len(plot_lines), 1, figsize=(12, 9), sharex=True)
+        for ax, line_idx in zip(axes, plot_lines):
+            line_rf_data = rf_data if line_idx == focus_line else extract_focus_line_rf(words, line_idx)[0]
+            for ch in range(TOTAL_CHANNELS):
+                ax.plot(line_rf_data[ch], linewidth=0.6)
+            ax.set_ylim(-600, 600)
+            ax.set_title(f"RF focus line {line_idx}")
+            ax.set_ylabel("ADC code")
+            ax.grid(True, alpha=0.3)
 
+        axes[-1].set_xlabel("sample")
+        fig.suptitle("RF data waveforms: focus lines 0, 32, 63")
+        fig.tight_layout()
+        plt.show()
     return rf_data
 
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Acquire raw RF data from circular DDR dump.")
-    parser.add_argument("--line", type=int, default=0, help="logical focus line index, 0..63")
+    parser.add_argument("--line", type=int, default=32, help="logical focus line index, 0..63")
     parser.add_argument("--csv", default=None, help="output merged CSV path; not saved if omitted")
     parser.add_argument("--dump", default=None, help="output raw DDR hex dump path; not saved if omitted")
     parser.add_argument("--all-lines", default=None, metavar="ROOT_DIR", help="output directory for all 64 logical focus-line CSV files; not saved if omitted")
-    parser.add_argument("--plot", action="store_true", help="plot the extracted 64-channel RF data")
-    return parser.parse_args()
+    parser.add_argument("--plot", action="store_true", help="plot RF waveforms for focus lines 0, 32, and 63")
+    parser.add_argument("--hv-delay", type=float, default=3.0, help="seconds to wait after HV enable before DDR transfer; default 3.0")
+    args = parser.parse_args()
+    if args.hv_delay < 0:
+        parser.error("--hv-delay must be non-negative")
+    return args
 
 
 if __name__ == "__main__":
@@ -275,4 +365,5 @@ if __name__ == "__main__":
         dump_path=args.dump,
         all_lines_dir=args.all_lines,
         plot=args.plot,
+        hv_delay_s=args.hv_delay,
     )

@@ -219,7 +219,7 @@ if __name__ == "__main__":
         max_gain_depth_cm=10.0,
         ramp_down_depth_cm=12.0,
         start_gain_code=0,
-        stop_gain_code=144,
+        stop_gain_code=32,
         pos_step_code=1,     # 0.25 dB/step
         neg_step_code=255,    # 9 dB/step, fast ramp down
         slope_fac=0,

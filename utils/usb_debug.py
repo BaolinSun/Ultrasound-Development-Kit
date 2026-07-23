@@ -13,6 +13,18 @@ def byte_to_double(data):
     return np.frombuffer(data, dtype='<u2')
 
 
+
+MAGIC = 0xA55A
+WORDS_PER_CHANNEL = 4096
+HEADER_WORDS = 3
+RF_SAMPLES = WORDS_PER_CHANNEL - HEADER_WORDS
+RTC_LINES = 128
+CHANNELS_PER_RTC_LINE = 32
+LOGICAL_LINES = 64
+TOTAL_CHANNELS = 64
+FRAME_WORDS = RTC_LINES * CHANNELS_PER_RTC_LINE * WORDS_PER_CHANNEL
+FRAME_BYTES = FRAME_WORDS * 2
+
 # ============================================================
 
 def usb_reader(data_queue, stop_flag):
@@ -50,7 +62,10 @@ def usb_reader(data_queue, stop_flag):
 
         while recv_flag:
             recv_flag = False
-            data = dev.read(0x81, read_length, timeout=5000)
+            data = dev.read(0x81, FRAME_BYTES, timeout=5000)
+            data = byte_to_double(data)
+            print(len(data))
+            np.savetxt('log/output.txt', data, fmt='%04X', delimiter='\n')
 
 
         break

@@ -6,7 +6,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 
-DEFAULT_DATA_DIR = Path(r"D:\MyProjects\py_prj\py_test\log\rfdata")
+DEFAULT_DATA_DIR = Path(r"D:\MyProjects\py_prj\ultrasound_dev_kit\log\rfdata")
 DEFAULT_FS = 25e6
 NUM_LINES = 64
 NUM_CHANNELS = 64
@@ -28,6 +28,7 @@ def load_rfdata(data_dir):
             raise FileNotFoundError(f"Missing RF CSV for line {line_idx}: {csv_path}")
 
         data = pd.read_csv(csv_path, header=None).to_numpy(dtype=np.int32)
+        # data[1::2, :] *= -1
         if data.shape != (NUM_SAMPLES, NUM_CHANNELS):
             raise ValueError(
                 f"Bad shape for {csv_path}: got {data.shape}, "
