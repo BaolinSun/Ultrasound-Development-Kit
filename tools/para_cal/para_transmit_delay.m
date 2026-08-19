@@ -4,7 +4,7 @@ if nargin < 1 || isempty(output_dir)
     output_dir = default_config_dir();
 end
 
-pitch       = 0.254e-3;
+pitch       = 0.3e-3;
 element_num = 64;
 c           = 1540;
 F           = 80e-3;
