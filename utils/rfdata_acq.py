@@ -9,7 +9,7 @@ import matplotlib.pyplot as plt
 
 
 MAGIC = 0xA55A
-WORDS_PER_CHANNEL = 4096
+WORDS_PER_CHANNEL = 2048
 HEADER_WORDS = 3
 RF_SAMPLES = WORDS_PER_CHANNEL - HEADER_WORDS
 RTC_LINES = 128
@@ -325,7 +325,7 @@ def usb_reader(
         )
 
     if plot:
-        plot_lines = (0, 32, 63)
+        plot_lines = (0, 31, 32, 63)
         fig, axes = plt.subplots(len(plot_lines), 1, figsize=(12, 9), sharex=True)
         for ax, line_idx in zip(axes, plot_lines):
             line_rf_data = rf_data if line_idx == focus_line else extract_focus_line_rf(words, line_idx)[0]

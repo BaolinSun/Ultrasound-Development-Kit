@@ -10,7 +10,7 @@ DEFAULT_DATA_DIR = Path(r"D:\MyProjects\py_prj\ultrasound_dev_kit\log\rfdata")
 DEFAULT_FS = 25e6
 NUM_LINES = 64
 NUM_CHANNELS = 64
-NUM_SAMPLES = 4096
+NUM_SAMPLES = 2048
 
 
 def load_rfdata(data_dir):

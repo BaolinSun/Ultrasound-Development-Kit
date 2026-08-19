@@ -15,7 +15,7 @@ def byte_to_double(data):
 
 
 MAGIC = 0xA55A
-WORDS_PER_CHANNEL = 4096
+WORDS_PER_CHANNEL = 2048
 HEADER_WORDS = 3
 RF_SAMPLES = WORDS_PER_CHANNEL - HEADER_WORDS
 RTC_LINES = 128
@@ -65,7 +65,7 @@ def usb_reader(data_queue, stop_flag):
             data = dev.read(0x81, FRAME_BYTES, timeout=5000)
             data = byte_to_double(data)
             print(len(data))
-            np.savetxt('log/output.txt', data, fmt='%04X', delimiter='\n')
+            np.savetxt('log/output_err.txt', data, fmt='%04X', delimiter='\n')
 
 
         break

@@ -10,7 +10,7 @@ DEFAULT_DATA_DIR = Path(r"D:\MyProjects\py_prj\ultrasound_dev_kit\log\rfdata")
 DEFAULT_FS = 25e6
 NUM_LINES = 64
 NUM_CHANNELS = 64
-NUM_SAMPLES = 4096
+NUM_SAMPLES = 2048
 
 
 def load_rfdata(data_dir):
@@ -41,10 +41,11 @@ def load_rfdata(data_dir):
 def main():
     rf_data = load_rfdata(DEFAULT_DATA_DIR)
 
-    fig, axs = plt.subplots(3, 1, figsize=(10, 8))
-    axs[0].plot(rf_data[0, :, 0])
-    axs[1].plot(rf_data[32, :, 0])
-    axs[2].plot(rf_data[63, :, 0])
+    fig, axs = plt.subplots(4, 1, figsize=(10, 10))
+    axs[0].plot(rf_data[27, :, 30])
+    axs[1].plot(rf_data[27, :, 31])
+    axs[2].plot(rf_data[27, :, 32])
+    axs[3].plot(rf_data[27, :, 33])
 
     plt.tight_layout()
     plt.show()

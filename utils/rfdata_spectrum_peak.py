@@ -16,7 +16,7 @@ from rfdata_analyzer import (
 )
 
 
-DEFAULT_OUT_DIR = Path(r"D:\MyProjects\py_prj\py_test\log\rfdata_spectrum_peak")
+DEFAULT_OUT_DIR = Path(r"D:\MyProjects\py_prj\ultrasound_dev_kit\log\rfdata_spectrum_peak")
 
 
 def compute_peak_matrices(rf_data, fs=DEFAULT_FS, use_log=False, min_freq_mhz=0.1):
