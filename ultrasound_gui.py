@@ -204,6 +204,8 @@ class UltrasoundImageWidget(QWidget):
             "tis": 0.2,
             "probe": "Unknown",
             "depth_mm": 126.1,
+            "full_depth_mm": 126.1,
+            "display_depth_mm": 126.1,
             "sampling_rate_mhz": 25.0,
             "focus_mm": 60.0,
         }
@@ -266,16 +268,21 @@ class UltrasoundImageWidget(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No image stream")
             return
 
-        scaled = self._pixmap.scaled(
-            self.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        )
-        x = (self.width() - scaled.width()) // 2
-        y = (self.height() - scaled.height()) // 2
-        image_rect = QRect(x, y, scaled.width(), scaled.height())
-        painter.drawPixmap(image_rect, scaled)
+        source_rect = self._display_source_rect()
+        target_size = self._pixmap.size()
+        target_size.scale(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
+        x = (self.width() - target_size.width()) // 2
+        y = (self.height() - target_size.height()) // 2
+        image_rect = QRect(x, y, target_size.width(), target_size.height())
+        painter.drawPixmap(image_rect, self._pixmap, source_rect)
         self._paint_overlay(painter, image_rect)
+
+    def _display_source_rect(self):
+        full_depth = max(1.0, float(self.overlay_state.get("full_depth_mm", self.overlay_state["depth_mm"])))
+        display_depth = max(1.0, float(self.overlay_state.get("display_depth_mm", full_depth)))
+        crop_ratio = min(1.0, max(0.05, display_depth / full_depth))
+        source_height = max(1, min(self._pixmap.height(), int(round(self._pixmap.height() * crop_ratio))))
+        return QRect(0, 0, self._pixmap.width(), source_height)
 
     def _paint_overlay(self, painter, image_rect):
         if image_rect.width() < 120 or image_rect.height() < 120:
@@ -303,7 +310,7 @@ class UltrasoundImageWidget(QWidget):
         painter.setPen(accent)
         painter.drawText(top_rect.adjusted(10, 0, -10, 0), Qt.AlignmentFlag.AlignVCenter, top_text)
 
-        depth_mm = max(1.0, float(self.overlay_state["depth_mm"]))
+        depth_mm = max(1.0, float(self.overlay_state.get("display_depth_mm", self.overlay_state["depth_mm"])))
         tick_step = 20
         tick_x = image_rect.left() + 14
         painter.setFont(QFont("Segoe UI", 9))
@@ -347,7 +354,7 @@ class UltrasoundImageWidget(QWidget):
         info_lines = [
             f"Probe: {self.overlay_state['probe']}",
             f"TX frequency: {self.overlay_state['frequency_mhz']:.1f} MHz",
-            f"Depth: {self.overlay_state['depth_mm']:.1f} mm",
+            f"Depth: {depth_mm:.1f} mm",
             f"Sampling: {self.overlay_state['sampling_rate_mhz']:.1f} MHz",
             f"Contrast Gain: {self.overlay_state['gain_db']:.2f}x",
             f"Dynamic Range: {int(self.overlay_state['dynamic_range_db'])} dB",
@@ -671,6 +678,9 @@ class UltrasoundMainWindow(QMainWindow):
         self.latency_text = "-- ms"
         self.temperature_text = "-- deg C"
         self.focus_depth_mm = 60.0
+        self.full_depth_mm = max(1.0, float(self.params.get("imaging_depth_mm", 126.1)))
+        self.min_display_depth_mm = min(20.0, self.full_depth_mm)
+        self.display_depth_mm = self.full_depth_mm
         self.default_dynamic_range_db = float(self.params.get("dynamic_range_db", 45))
         self.default_brightness_db = float(self.params.get("brightness_db", 3.0))
         self.default_contrast_gain = float(self.params.get("contrast_gain", 1.0))
@@ -769,8 +779,13 @@ class UltrasoundMainWindow(QMainWindow):
         header_layout.addWidget(self.status_badge)
 
         self.image_widget = UltrasoundImageWidget()
+        image_display_row = QHBoxLayout()
+        image_display_row.setContentsMargins(0, 0, 0, 0)
+        image_display_row.setSpacing(10)
+        image_display_row.addWidget(self._make_depth_control_panel())
+        image_display_row.addWidget(self.image_widget, 1)
         image_column.addWidget(header)
-        image_column.addWidget(self.image_widget, 1)
+        image_column.addLayout(image_display_row, 1)
         image_column.addWidget(self._make_quick_controls_panel())
         self.main_splitter.addWidget(image_panel)
 
@@ -1088,6 +1103,45 @@ class UltrasoundMainWindow(QMainWindow):
         self.pipeline.set_tgc_enabled(False)
         return panel
 
+    def _make_depth_control_panel(self):
+        panel = QFrame()
+        panel.setObjectName("DepthControlPanel")
+        panel.setFixedWidth(78)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(9, 10, 9, 10)
+        layout.setSpacing(8)
+
+        title = QLabel("DEPTH")
+        title.setObjectName("DepthControlTitle")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.depth_value_label = QLabel(f"{self.display_depth_mm:.0f} mm")
+        self.depth_value_label.setObjectName("DepthControlValue")
+        self.depth_value_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        min_depth = int(round(self.min_display_depth_mm))
+        max_depth = int(round(self.full_depth_mm))
+        if max_depth < min_depth:
+            min_depth = max_depth
+        self.depth_slider = QSlider(Qt.Orientation.Vertical)
+        self.depth_slider.setObjectName("DepthSlider")
+        self.depth_slider.setRange(min_depth, max_depth)
+        self.depth_slider.setSingleStep(1)
+        self.depth_slider.setPageStep(5)
+        self.depth_slider.setTickPosition(QSlider.TickPosition.TicksRight)
+        self.depth_slider.setTickInterval(20)
+        self.depth_slider.setInvertedAppearance(True)
+        self.depth_slider.setValue(max_depth)
+
+        range_label = QLabel(f"{min_depth}-{max_depth}\nmm")
+        range_label.setObjectName("DepthRangeLabel")
+        range_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        layout.addWidget(title)
+        layout.addWidget(self.depth_value_label)
+        layout.addWidget(self.depth_slider, 1)
+        layout.addWidget(range_label)
+        return panel
+
     def _make_quick_controls_panel(self):
         panel = QFrame()
         panel.setObjectName("QuickControls")
@@ -1167,6 +1221,7 @@ class UltrasoundMainWindow(QMainWindow):
         self.start_stop_button.clicked.connect(self._toggle_run)
         self.freeze_button.clicked.connect(self._toggle_freeze)
         self.dr_slider.valueChanged.connect(self._dynamic_range_changed)
+        self.depth_slider.valueChanged.connect(self._display_depth_changed)
         self.mode_combo.currentTextChanged.connect(self._mode_changed)
         self.reset_bmode_button.clicked.connect(self._reset_bmode_controls)
         self.ps_refresh_button.clicked.connect(self._refresh_serial_ports)
@@ -1722,11 +1777,28 @@ class UltrasoundMainWindow(QMainWindow):
         self.brightness_value_label.setText(f"{self.brightness_db:.1f} dB")
         self.contrast_value_label.setText(f"{self.contrast_gain:.2f}x")
         self.noise_floor_value_label.setText(f"{self.noise_floor_db:.1f} dB")
+        self.depth_slider.blockSignals(True)
+        self.depth_slider.setValue(int(round(self.full_depth_mm)))
+        self.depth_slider.blockSignals(False)
+        self.display_depth_mm = self.full_depth_mm
+        self._update_depth_labels()
         self.imaging_labels["dynamic_range"].setText(f"{self.dynamic_range_db:.0f} dB")
         self.imaging_labels["brightness"].setText(f"{self.brightness_db:.1f} dB")
         self.imaging_labels["contrast"].setText(f"{self.contrast_gain:.2f}x")
         self.imaging_labels["noise_floor"].setText(f"{self.noise_floor_db:.1f} dB")
         self._sync_bmode_params()
+
+    def _display_depth_changed(self, value):
+        self.display_depth_mm = float(np.clip(value, self.min_display_depth_mm, self.full_depth_mm))
+        self._update_depth_labels()
+        self._update_overlay()
+
+    def _update_depth_labels(self):
+        depth_text = f"{self.display_depth_mm:.0f} mm"
+        if hasattr(self, "depth_value_label"):
+            self.depth_value_label.setText(depth_text)
+        if hasattr(self, "imaging_labels"):
+            self.imaging_labels["depth"].setText(depth_text)
 
     def _current_bmode_values(self):
         return [
@@ -1842,7 +1914,7 @@ class UltrasoundMainWindow(QMainWindow):
         QMessageBox.warning(self, "Ultrasound Pipeline", message)
 
     def _update_params(self):
-        self.imaging_labels["depth"].setText(f"{self.params['imaging_depth_mm']:.1f} mm")
+        self._update_depth_labels()
         self.imaging_labels["frequency"].setText(f"{self.params['probe_frequency_mhz']:.1f} MHz")
         self.imaging_labels["focus"].setText(f"{self.focus_depth_mm:.0f} mm")
         self.imaging_labels["dynamic_range"].setText(f"{self.dynamic_range_db:.0f} dB")
@@ -1861,7 +1933,9 @@ class UltrasoundMainWindow(QMainWindow):
             mi=0.8,
             tis=0.2,
             probe=self.probe_status,
-            depth_mm=float(self.params["imaging_depth_mm"]),
+            depth_mm=float(self.display_depth_mm),
+            full_depth_mm=float(self.full_depth_mm),
+            display_depth_mm=float(self.display_depth_mm),
             sampling_rate_mhz=float(self.params["sampling_rate_mhz"]),
             focus_mm=float(self.focus_depth_mm),
         )
@@ -2077,6 +2151,33 @@ class UltrasoundMainWindow(QMainWindow):
                 border: 1px solid #1f344b;
                 border-radius: 7px;
             }
+            #DepthControlPanel {
+                background: #091421;
+                border: 1px solid #1c3148;
+                border-radius: 8px;
+            }
+            #DepthControlTitle {
+                background: transparent;
+                color: #8ca8bd;
+                font-size: 11px;
+                font-weight: 900;
+                letter-spacing: 0px;
+            }
+            #DepthControlValue {
+                background: #06101b;
+                color: #67e8f9;
+                border: 1px solid #164e63;
+                border-radius: 6px;
+                padding: 5px 2px;
+                font-size: 12px;
+                font-weight: 900;
+            }
+            #DepthRangeLabel {
+                background: transparent;
+                color: #7892aa;
+                font-size: 10px;
+                font-weight: 700;
+            }
             #LiveButton, #FreezeButton, #ToolButton {
                 border-radius: 8px;
                 padding: 10px 12px;
@@ -2228,6 +2329,32 @@ class UltrasoundMainWindow(QMainWindow):
                 padding: 8px;
                 font-family: "Cascadia Mono", Consolas, monospace;
                 font-size: 11px;
+            }
+
+            QSlider#DepthSlider::groove:vertical {
+                width: 6px;
+                background: #203348;
+                border-radius: 3px;
+            }
+            QSlider#DepthSlider::sub-page:vertical {
+                background: #203348;
+                border-radius: 3px;
+            }
+            QSlider#DepthSlider::add-page:vertical {
+                background: #22d3ee;
+                border-radius: 3px;
+            }
+            QSlider#DepthSlider::handle:vertical {
+                width: 18px;
+                height: 18px;
+                margin: 0 -6px;
+                border-radius: 9px;
+                background: #e6fbff;
+                border: 2px solid #38bdf8;
+            }
+            QSlider#DepthSlider::handle:vertical:hover {
+                background: #ffffff;
+                border-color: #67e8f9;
             }
             QSlider::groove:horizontal {
                 height: 6px;

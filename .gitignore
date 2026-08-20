@@ -6,7 +6,12 @@
 !*.bat
 !.gitignore
 !README.md
+!docs/*.md
+!requirements-hydrophone.txt
 
+data/
+output/
+tmp/
 .vscode/
 __pycache__/
 *.py[cod]

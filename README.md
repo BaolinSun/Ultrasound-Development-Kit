@@ -51,9 +51,18 @@ The desktop app starts the acquisition and processing workers, receives processe
 |   |-- calc_dtgc_registers.py       # AFE5832 DTGC register calculator
 |   |-- configs/                     # Default JSON configuration files
 |   `-- para_cal/                    # MATLAB generators for BRAM JSON defaults
+|-- docs/
+|   `-- hisense_acquisition_protocol.md  # Calibration sweep protocol for the Hisense console
+|-- image_autotune/                  # Image-feedback automatic parameter tuning
+|   |-- hisense_loader.py            # Console export parsing and BC0 loading
+|   |-- hisense_backend_sim.py       # Offline back-end display model and calibration
+|   |-- hisense_display_response.py  # Display response recovery from a uniform-TGC sweep
+|   |-- hisense_metrics.py           # Phantom image-quality metrics
+|   |-- hisense_tgc_optimizer.py     # Closed-loop TGC parameter suggestion
+|   `-- hisense_analyze.py           # Analysis figures and Markdown summary
 `-- utils/
     |-- rfdata_acq.py                # DDR RF acquisition and CSV export
-    |-- rfdata_analysis.py           # RF waveform and spectrum analysis
+    |-- rfdata_analyzer.py           # RF waveform and spectrum analysis
     |-- rfdata_spectrum_peak.py      # 64x64 spectrum peak matrices
     `-- usb_reader.py / usb_debug.py # Lower-level USB debug utilities
 ```
@@ -161,6 +170,75 @@ python utils/rfdata_spectrum_peak.py --data-dir log/rfdata --out-dir log/rfdata_
 ```
 
 The RF analysis tools expect files named `rfdata_1.csv` through `rfdata_64.csv`, each with `4096` samples by `64` channels.
+
+## Image Autotune (图像反馈的参数自动整定)
+
+`image_autotune/` 实现「根据超声图像闭环自适应地反馈调整参数」这条链路：
+解析主机导出的采集目录 → 离线仿真后端 → 计算客观指标 → 求解并给出参数建议。
+**不依赖硬件**，只需要 numpy / matplotlib / Pillow。
+
+目前的实现针对海信主机的导出格式（`data/hisense_medical/<场次>/<采集>/`），
+因此模块以 `hisense_` 前缀标明与厂商相关的部分；控制律与指标本身与厂商无关。
+
+关键结论：`Algo_BC0.bin`（256 线 × 870 点 × uint16，对数域包络数据）是在**整条后端处理链之前**
+抽头的 —— 改变 TGC 时它不变（帧间离散 < 0.2 dB），而显示图像变化超过 20 dB。
+因此 BC0 是与显示参数无关的组织观测量，后端旋钮可以完全离线仿真。
+
+| 模块 | 作用 |
+|---|---|
+| `hisense_loader.py` | 解析 `.pdt` 参数文件、按 `Algo_PartitionInfo.pdt` 校验并加载 BC0、定位截图中的图像区 |
+| `hisense_backend_sim.py` | 后端前向模型（TGC / 增益 / 动态范围 / 深度响应）与各常数的标定 |
+| `hisense_metrics.py` | 仿体客观指标：深度均匀性、斑点 SNR、囊肿 CNR、点目标 −6 dB 宽度、饱和/压黑占比 |
+| `hisense_tgc_optimizer.py` | 闭环 TGC 求解器，输出建议的 8 档滑块值与预测的指标变化 |
+| `hisense_display_response.py` | 从均匀 TGC 扫描反解显示响应曲线（证明显示灰阶非线性）|
+| `hisense_analyze.py` | 重跑全部标定与验证，生成图与 `summary.md` |
+
+查看采集目录摘要：
+
+```powershell
+python image_autotune/hisense_loader.py --data-dir data/hisense_medical/20260819
+```
+
+标定后端模型并对照主机截图做留出验证：
+
+```powershell
+python image_autotune/hisense_backend_sim.py --data-dir data/hisense_medical/20260819
+```
+
+对某一帧给出 TGC 建议值：
+
+```powershell
+python image_autotune/hisense_tgc_optimizer.py --data-dir data/hisense_medical/20260819 --capture data/hisense_medical/20260819/S0-a
+```
+
+生成完整分析报告：
+
+```powershell
+python image_autotune/hisense_analyze.py --data-dir data/hisense_medical/20260819 --out-dir output/hisense19
+```
+
+### 标定现状
+
+TGC 是 dB 域**加性、深度均匀、线性**的执行器，中性点 127 —— 这一点由 20260819 全量程扫描确证：
+逐带斜率经响应修正后收敛到 1.08×（bands 1–7 变异系数 2.2%），
+且「Gain +50 档」与「TGC +127 档」产生的图像逐带差异 ≤ 3 灰阶，
+而 Gain 作为全局标量不可能带深度权重。
+
+**已知未解决**：`hisense_backend_sim.py` 仍假设显示灰阶与 dB 线性，
+而 20260819 的数据显示显示端在暗部压缩约 3 倍（见 `hisense_display_response.py`）。
+受影响的是 `C(z)` 与 `db_per_level` 两个标定量，导致建议档位偏移平均 9 档（约 0.74 dB）、最大 18 档。
+优化器的**相对形状可信，绝对档位尚不可信**；滑块因此仍限制在 70–185，
+`--allow-extrapolation` 可显式放开。
+
+Gain 轴有一个来自 S1-L 的初步估计（1 Gain 档 ≈ 2.51 TGC 档），但尚未验证线性度；
+动态范围轴未标定。绝对 dB 刻度依赖「`UIDynamicRangeLevel` 即字面 dB」这一未验证假设，
+由 [docs/hisense_acquisition_protocol.md](docs/hisense_acquisition_protocol.md) 的序列 S2/S3 解决。
+
+`image_autotune/` implements the image-feedback parameter tuning loop. `Algo_BC0.bin` is
+tapped upstream of the back end, so it is invariant to the display knobs and every back-end
+parameter can be simulated without the console in the loop. The TGC actuator is identified as
+a depth-uniform additive dB gain, which lets the optimiser invert it analytically instead of
+searching. The display response is known to be nonlinear and is not yet wired into the model.
 
 ## MATLAB Parameter Generation
 
