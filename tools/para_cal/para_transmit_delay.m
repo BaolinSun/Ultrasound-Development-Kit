@@ -1,11 +1,14 @@
-function delay_fpga = para_transmit_delay(output_dir, write_json)
+function delay_fpga = para_transmit_delay(output_dir, write_json, F)
 %PARA_TRANSMIT_DELAY Generate the mapped TX7332 delay profile.
 %
-% delay_fpga = para_transmit_delay(output_dir, write_json) calculates all
+% delay_fpga = para_transmit_delay(output_dir, write_json, F) calculates all
 % per-element parameters in natural physical order, maps them once at the
 % TX hardware boundary, and packs 11 active register groups into each
 % fixed 128-word block. JSON output remains enabled by default.
 
+if nargin < 3 || isempty(F)
+    F = 80e-3;
+end
 if nargin < 2
     write_json = true;
 end
@@ -19,7 +22,6 @@ end
 pitch       = 0.3e-3;
 element_num = 64;
 c           = 1540;
-F           = 80e-3;
 nxmits      = 64;
 
 idx = (0:element_num-1)';

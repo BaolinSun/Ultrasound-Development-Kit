@@ -4,6 +4,7 @@
 !*.json
 !*.m
 !*.bat
+!tools/configs/probe_channel_map.csv
 !.gitignore
 !README.md
 !docs/*.md

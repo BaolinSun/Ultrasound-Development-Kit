@@ -207,8 +207,27 @@ def nothing(x):
     pass
 
 
-def precompute_scan_converter(num_lines, num_range):
-    """Precompute MATLAB-style polar-to-Cartesian bilinear indices and weights."""
+def full_imaging_depth_mm():
+    """Return the full physical receive depth represented by the current RF frame."""
+    range_step_m = DEFAULT_SOUND_SPEED_M_S / (2.0 * DEFAULT_SAMPLING_RATE_HZ)
+    return range_step_m * (DEFAULT_RF_DEPTH - 1) * 1000.0
+
+
+def clamp_display_depth_mm(display_depth_mm):
+    """Clamp GUI display depth without changing acquisition frame length."""
+    full_depth = full_imaging_depth_mm()
+    if display_depth_mm is None:
+        return full_depth
+    return float(np.clip(float(display_depth_mm), 20.0, full_depth))
+
+
+def precompute_scan_converter(num_lines, num_range, display_depth_mm=None):
+    """Precompute MATLAB-style polar-to-Cartesian bilinear indices and weights.
+
+    display_depth_mm changes only the Cartesian field of view. The input polar
+    frame still keeps the full num_range samples, so no hardware or acquisition
+    depth changes are required.
+    """
     c = DEFAULT_SOUND_SPEED_M_S
     fc = DEFAULT_PROBE_FREQUENCY_HZ
     fs = DEFAULT_SAMPLING_RATE_HZ
@@ -216,8 +235,9 @@ def precompute_scan_converter(num_lines, num_range):
     range_step_m = c / (2.0 * fs)
 
     angles_rad = np.deg2rad(np.linspace(-45.0, 45.0, num_lines)).astype(np.float32)
-    r_axis_m = (np.arange(num_range, dtype=np.float32) * range_step_m).astype(np.float32)
-    r_max = float(r_axis_m[-1])
+    full_r_max = float((num_range - 1) * range_step_m)
+    requested_depth_m = clamp_display_depth_mm(display_depth_mm) / 1000.0
+    r_max = min(full_r_max, requested_depth_m)
     x_max = r_max * np.sin(np.deg2rad(45.0))
     x_axis = np.arange(-x_max, x_max + cart_step_m * 0.5, cart_step_m, dtype=np.float32)
     z_axis = np.arange(0.0, r_max + cart_step_m * 0.5, cart_step_m, dtype=np.float32)
@@ -339,6 +359,14 @@ def read_shared_tgc_enabled(enable_tgc):
     return bool(enable_tgc)
 
 
+def read_shared_display_depth_mm(display_depth_mm):
+    if display_depth_mm is None:
+        return full_imaging_depth_mm()
+    if hasattr(display_depth_mm, "value"):
+        return clamp_display_depth_mm(display_depth_mm.value)
+    return clamp_display_depth_mm(display_depth_mm)
+
+
 def usb_reader(data_queue, stop_flag, pause_flag=None):
     """
     USB数据采集进程
@@ -415,8 +443,19 @@ def usb_reader(data_queue, stop_flag, pause_flag=None):
     print("[USB] Stop.")
 
 
-def data_worker(data_queue, img_queue, stop_flag, bmode_params, graymap_lut, pause_flag=None, tgc_gain=None, enable_tgc=None):
-    scan = precompute_scan_converter(DEFAULT_CHANNEL_COUNT, DEFAULT_RF_DEPTH)
+def data_worker(
+    data_queue,
+    img_queue,
+    stop_flag,
+    bmode_params,
+    graymap_lut,
+    pause_flag=None,
+    tgc_gain=None,
+    enable_tgc=None,
+    display_depth_mm=None,
+):
+    active_display_depth_mm = read_shared_display_depth_mm(display_depth_mm)
+    scan = precompute_scan_converter(DEFAULT_CHANNEL_COUNT, DEFAULT_RF_DEPTH, active_display_depth_mm)
 
     # Basic imaging parameters used by both the legacy display and the GUI.
     c = DEFAULT_SOUND_SPEED_M_S
@@ -468,6 +507,15 @@ def data_worker(data_queue, img_queue, stop_flag, bmode_params, graymap_lut, pau
         except Exception:
             continue
         
+        requested_display_depth_mm = read_shared_display_depth_mm(display_depth_mm)
+        if abs(requested_display_depth_mm - active_display_depth_mm) > 0.5:
+            active_display_depth_mm = requested_display_depth_mm
+            scan = precompute_scan_converter(
+                DEFAULT_CHANNEL_COUNT,
+                DEFAULT_RF_DEPTH,
+                active_display_depth_mm,
+            )
+
         polar_log10 = apply_tgc_gain_log10_q214(
             rfdata,
             read_shared_tgc_gain(tgc_gain),

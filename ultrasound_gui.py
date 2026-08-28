@@ -47,6 +47,11 @@ PS_TOOLS_DIR = Path(__file__).resolve().parent / "tools"
 PS_CONFIG_GUI = PS_TOOLS_DIR / "ultrasound_config_gui.py"
 PS_UART_TOOL = PS_TOOLS_DIR / "ultrasound_config_uart.py"
 PS_USB_TOOL = PS_TOOLS_DIR / "ultrasound_config_usb.py"
+PARA_CAL_DIR = PS_TOOLS_DIR / "para_cal"
+PARA_TRANSMIT_DELAY_M = PARA_CAL_DIR / "para_transmit_delay.m"
+FOCUS_RUNTIME_DIR = Path(__file__).resolve().parent / "tmp" / "runtime_focus_profile"
+FOCUS_RUNTIME_JSON = FOCUS_RUNTIME_DIR / "delay_profile_default.json"
+DEFAULT_FOCUS_DEPTH_MM = 80.0
 TGC_MIN_DB = -24.0
 TGC_MAX_DB = 24.0
 PS_UART_TARGETS = [
@@ -191,9 +196,16 @@ class WindowTitleBar(QFrame):
 class UltrasoundImageWidget(QWidget):
     """Aspect-ratio preserving display for grayscale or RGB/BGR ultrasound frames."""
 
+    focus_preview_changed = Signal(float)
+    focus_commit_requested = Signal(float)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._pixmap = QPixmap()
+        self._last_image_rect = QRect()
+        self._focus_marker_rect = QRect()
+        self._focus_dragging = False
+        self._focus_drag_enabled = True
         self.overlay_state = {
             "mode": "B-mode",
             "frequency_mhz": 2.5,
@@ -207,9 +219,10 @@ class UltrasoundImageWidget(QWidget):
             "full_depth_mm": 126.1,
             "display_depth_mm": 126.1,
             "sampling_rate_mhz": 25.0,
-            "focus_mm": 60.0,
+            "focus_mm": DEFAULT_FOCUS_DEPTH_MM,
         }
         self.setMinimumSize(420, 320)
+        self.setMouseTracking(True)
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent)
 
     def set_overlay_state(self, **state):
@@ -268,21 +281,73 @@ class UltrasoundImageWidget(QWidget):
             painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, "No image stream")
             return
 
-        source_rect = self._display_source_rect()
-        target_size = self._pixmap.size()
-        target_size.scale(self.size(), Qt.AspectRatioMode.KeepAspectRatio)
-        x = (self.width() - target_size.width()) // 2
-        y = (self.height() - target_size.height()) // 2
-        image_rect = QRect(x, y, target_size.width(), target_size.height())
-        painter.drawPixmap(image_rect, self._pixmap, source_rect)
+        scaled = self._pixmap.scaled(
+            self.size(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        x = (self.width() - scaled.width()) // 2
+        y = (self.height() - scaled.height()) // 2
+        image_rect = QRect(x, y, scaled.width(), scaled.height())
+        self._last_image_rect = image_rect
+        painter.drawPixmap(image_rect, scaled)
         self._paint_overlay(painter, image_rect)
 
-    def _display_source_rect(self):
-        full_depth = max(1.0, float(self.overlay_state.get("full_depth_mm", self.overlay_state["depth_mm"])))
-        display_depth = max(1.0, float(self.overlay_state.get("display_depth_mm", full_depth)))
-        crop_ratio = min(1.0, max(0.05, display_depth / full_depth))
-        source_height = max(1, min(self._pixmap.height(), int(round(self._pixmap.height() * crop_ratio))))
-        return QRect(0, 0, self._pixmap.width(), source_height)
+    def set_focus_interaction_enabled(self, enabled):
+        self._focus_drag_enabled = bool(enabled)
+        if not self._focus_drag_enabled:
+            self._focus_dragging = False
+            self.unsetCursor()
+
+    def _event_pos(self, event):
+        if hasattr(event, "position"):
+            return event.position().toPoint()
+        return event.pos()
+
+    def _focus_depth_from_pos(self, pos):
+        image_rect = self._last_image_rect
+        if image_rect.isNull() or image_rect.height() <= 0:
+            return float(self.overlay_state.get("focus_mm", DEFAULT_FOCUS_DEPTH_MM))
+        depth_mm = max(1.0, float(self.overlay_state.get("display_depth_mm", self.overlay_state["depth_mm"])))
+        ratio = (pos.y() - image_rect.top()) / max(1, image_rect.height())
+        ratio = float(np.clip(ratio, 20.0 / depth_mm, 1.0))
+        return ratio * depth_mm
+
+    def mousePressEvent(self, event):
+        if (
+            self._focus_drag_enabled
+            and event.button() == Qt.MouseButton.LeftButton
+            and self._focus_marker_rect.contains(self._event_pos(event))
+        ):
+            self._focus_dragging = True
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        pos = self._event_pos(event)
+        if self._focus_dragging:
+            focus_mm = self._focus_depth_from_pos(pos)
+            self.focus_preview_changed.emit(float(focus_mm))
+            event.accept()
+            return
+        if self._focus_drag_enabled and self._focus_marker_rect.contains(pos):
+            self.setCursor(Qt.CursorShape.SizeVerCursor)
+        else:
+            self.unsetCursor()
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._focus_dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._focus_dragging = False
+            self.unsetCursor()
+            focus_mm = self._focus_depth_from_pos(self._event_pos(event))
+            self.focus_preview_changed.emit(float(focus_mm))
+            self.focus_commit_requested.emit(float(focus_mm))
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
     def _paint_overlay(self, painter, image_rect):
         if image_rect.width() < 120 or image_rect.height() < 120:
@@ -333,6 +398,7 @@ class UltrasoundImageWidget(QWidget):
                 QPoint(focus_x + 13, focus_y + 8),
             ]
         )
+        self._focus_marker_rect = QRect(focus_x - 76, focus_y - 18, 96, 36)
         painter.setBrush(accent)
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawPolygon(marker)
@@ -677,7 +743,9 @@ class UltrasoundMainWindow(QMainWindow):
         self.probe_status = "Connected" if demo_mode else "Unknown"
         self.latency_text = "-- ms"
         self.temperature_text = "-- deg C"
-        self.focus_depth_mm = 60.0
+        self.focus_depth_mm = DEFAULT_FOCUS_DEPTH_MM
+        self.applied_focus_depth_mm = DEFAULT_FOCUS_DEPTH_MM
+        self.pending_focus_depth_mm = None
         self.full_depth_mm = max(1.0, float(self.params.get("imaging_depth_mm", 126.1)))
         self.min_display_depth_mm = min(20.0, self.full_depth_mm)
         self.display_depth_mm = self.full_depth_mm
@@ -698,6 +766,15 @@ class UltrasoundMainWindow(QMainWindow):
         self._usb_config_restart_after_finish = False
         self._usb_config_restore_paused = False
         self._usb_config_saved_bmode_values = None
+        self._focus_update_in_progress = False
+        self._focus_restart_after_finish = False
+        self._focus_restore_paused = False
+        self._focus_saved_bmode_values = None
+        self._focus_config_success = False
+        self._focus_beam_next_step = None
+        self.focus_matlab_process = None
+        self.focus_usb_config_process = None
+        self.focus_beam_process = None
 
         self.setWindowTitle("UltraVision Workstation")
         self.setWindowFlags(self.windowFlags() | Qt.WindowType.FramelessWindowHint)
@@ -1233,6 +1310,9 @@ class UltrasoundMainWindow(QMainWindow):
         self.tgc_save_button.clicked.connect(self._save_tgc)
         self.tgc_load_button.clicked.connect(self._load_tgc)
 
+        self.image_widget.focus_preview_changed.connect(self._focus_preview_changed)
+        self.image_widget.focus_commit_requested.connect(self._focus_commit_requested)
+
         self.pipeline.frame_ready.connect(self.image_widget.set_frame)
         self.pipeline.fps_updated.connect(self._update_fps)
         self.pipeline.status_changed.connect(self._set_status)
@@ -1704,6 +1784,264 @@ class UltrasoundMainWindow(QMainWindow):
         ):
             self.ps_advanced_config_process = None
 
+    def _focus_preview_changed(self, focus_mm):
+        self.focus_depth_mm = float(np.clip(focus_mm, 20.0, self.display_depth_mm))
+        self._update_focus_labels()
+        self._update_overlay()
+
+    def _update_focus_labels(self):
+        if hasattr(self, "imaging_labels"):
+            self.imaging_labels["focus"].setText(f"{self.focus_depth_mm:.0f} mm")
+
+    def _set_focus_controls_enabled(self, enabled):
+        self.image_widget.set_focus_interaction_enabled(enabled)
+        self.start_stop_button.setEnabled(enabled)
+        self.freeze_button.setEnabled(enabled and self.pipeline.running)
+        self.ps_usb_config_button.setEnabled(enabled)
+
+    def _focus_commit_requested(self, focus_mm):
+        if self._focus_update_in_progress:
+            self._append_ps_usb_output("Focus update skipped: another focus update is running.\n")
+            return
+        if self.ps_usb_config_process and self.ps_usb_config_process.state() != QProcess.ProcessState.NotRunning:
+            self._append_ps_usb_output("Focus update skipped: USB configuration is already running.\n")
+            return
+        if not PARA_TRANSMIT_DELAY_M.exists():
+            self._append_ps_usb_output(f"Missing MATLAB delay generator: {PARA_TRANSMIT_DELAY_M}\n")
+            return
+        if not PS_USB_TOOL.exists():
+            self._append_ps_usb_output(f"Missing USB config tool: {PS_USB_TOOL}\n")
+            return
+
+        self.pending_focus_depth_mm = float(np.clip(focus_mm, 20.0, self.display_depth_mm))
+        self.focus_depth_mm = self.pending_focus_depth_mm
+        self._update_focus_labels()
+        self._update_overlay()
+
+        self._focus_update_in_progress = True
+        self._focus_config_success = False
+        self._focus_restart_after_finish = bool(self.pipeline.running)
+        self._focus_restore_paused = bool(self._paused)
+        self._focus_saved_bmode_values = self._current_bmode_values()
+        self._set_focus_controls_enabled(False)
+        self._set_status("Focus Update")
+
+        self._append_ps_usb_output(
+            f"\nFocus update requested: {self.pending_focus_depth_mm:.1f} mm\n"
+            "Freezing display and preparing delay profile update...\n"
+        )
+
+        if self.pipeline.running:
+            self._paused = True
+            self.pipeline.pause(True)
+            self.freeze_button.setText("RESUME")
+            self._append_ps_usb_output("Stopping live acquisition to release USB device for focus update...\n")
+            self.pipeline.stop()
+            self.fps_label.setText("FPS 0.0")
+            self._update_fps(0.0)
+            self._append_ps_usb_output("USB acquisition stopped. Sending BEAM STOP...\n")
+            self._start_focus_beam_control("stop", "matlab")
+        else:
+            self._start_focus_matlab_generation()
+
+    def _matlab_path(self, path):
+        return str(Path(path).resolve()).replace("\\", "/").replace("'", "''")
+
+    def _start_focus_matlab_generation(self):
+        FOCUS_RUNTIME_DIR.mkdir(parents=True, exist_ok=True)
+        focus_m = float(self.pending_focus_depth_mm or self.focus_depth_mm) / 1000.0
+        command = (
+            f"cd('{self._matlab_path(PARA_CAL_DIR)}'); "
+            f"para_transmit_delay('{self._matlab_path(FOCUS_RUNTIME_DIR)}', true, {focus_m:.9f});"
+        )
+        self._append_ps_usb_output(f"Generating delay profile with MATLAB, focus={focus_m:.6f} m...\n")
+
+        process = QProcess(self)
+        process.setProgram("matlab")
+        process.setArguments(["-batch", command])
+        process.setWorkingDirectory(str(PARA_CAL_DIR))
+        process.readyReadStandardOutput.connect(self._read_focus_matlab_stdout)
+        process.readyReadStandardError.connect(self._read_focus_matlab_stderr)
+        process.finished.connect(self._focus_matlab_finished)
+        process.errorOccurred.connect(self._focus_matlab_error)
+        self.focus_matlab_process = process
+        process.start()
+
+    def _read_focus_matlab_stdout(self):
+        if not self.focus_matlab_process:
+            return
+        data = bytes(self.focus_matlab_process.readAllStandardOutput()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _read_focus_matlab_stderr(self):
+        if not self.focus_matlab_process:
+            return
+        data = bytes(self.focus_matlab_process.readAllStandardError()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _focus_matlab_finished(self, exit_code, exit_status):
+        self._read_focus_matlab_stdout()
+        self._read_focus_matlab_stderr()
+        self.focus_matlab_process = None
+        if exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit and FOCUS_RUNTIME_JSON.exists():
+            self._append_ps_usb_output(f"MATLAB delay profile generated: {FOCUS_RUNTIME_JSON}\n")
+            self._start_focus_usb_config()
+        else:
+            self._append_ps_usb_output(f"MATLAB delay profile generation failed, exit code {exit_code}.\n")
+            self._finish_focus_update(False)
+
+    def _focus_matlab_error(self, error):
+        self._append_ps_usb_output(f"MATLAB QProcess error: {error}\n")
+        if self.focus_matlab_process and self.focus_matlab_process.state() == QProcess.ProcessState.NotRunning:
+            self.focus_matlab_process = None
+            self._finish_focus_update(False)
+
+    def _start_focus_usb_config(self):
+        self._append_ps_usb_output("Sending delay_profile via USB...\n")
+        process = QProcess(self)
+        process.setProgram(sys.executable)
+        process.setArguments([
+            "-u",
+            str(PS_USB_TOOL),
+            "--target",
+            "delay_profile",
+            "--delay-profile-config",
+            str(FOCUS_RUNTIME_JSON),
+        ])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
+        process.readyReadStandardOutput.connect(self._read_focus_usb_stdout)
+        process.readyReadStandardError.connect(self._read_focus_usb_stderr)
+        process.finished.connect(self._focus_usb_finished)
+        process.errorOccurred.connect(self._focus_usb_error)
+        self.focus_usb_config_process = process
+        process.start()
+
+    def _read_focus_usb_stdout(self):
+        if not self.focus_usb_config_process:
+            return
+        data = bytes(self.focus_usb_config_process.readAllStandardOutput()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _read_focus_usb_stderr(self):
+        if not self.focus_usb_config_process:
+            return
+        data = bytes(self.focus_usb_config_process.readAllStandardError()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _focus_usb_finished(self, exit_code, exit_status):
+        self._read_focus_usb_stdout()
+        self._read_focus_usb_stderr()
+        self.focus_usb_config_process = None
+        success = exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit
+        if success:
+            self.applied_focus_depth_mm = float(self.pending_focus_depth_mm or self.focus_depth_mm)
+            self._focus_config_success = True
+            self._append_ps_usb_output(f"Focus delay profile applied: {self.applied_focus_depth_mm:.1f} mm\n")
+        else:
+            self._append_ps_usb_output(f"Focus USB configuration failed, exit code {exit_code}.\n")
+        self._finish_focus_update(success)
+
+    def _focus_usb_error(self, error):
+        self._append_ps_usb_output(f"Focus USB QProcess error: {error}\n")
+        if self.focus_usb_config_process and self.focus_usb_config_process.state() == QProcess.ProcessState.NotRunning:
+            self.focus_usb_config_process = None
+            self._finish_focus_update(False)
+
+    def _start_focus_beam_control(self, operation, next_step):
+        if not PS_USB_TOOL.exists():
+            self._append_ps_usb_output(f"Missing USB config tool: {PS_USB_TOOL}\n")
+            self._finish_focus_update(False)
+            return
+        self._focus_beam_next_step = next_step
+        self._append_ps_usb_output(f"Focus update BEAM {operation.upper()} via USB\n")
+        process = QProcess(self)
+        process.setProgram(sys.executable)
+        process.setArguments(["-u", str(PS_USB_TOOL), "--beam", operation])
+        process.setWorkingDirectory(str(PS_TOOLS_DIR))
+        process.readyReadStandardOutput.connect(self._read_focus_beam_stdout)
+        process.readyReadStandardError.connect(self._read_focus_beam_stderr)
+        process.finished.connect(self._focus_beam_finished)
+        process.errorOccurred.connect(self._focus_beam_error)
+        self.focus_beam_process = process
+        process.start()
+
+    def _read_focus_beam_stdout(self):
+        if not self.focus_beam_process:
+            return
+        data = bytes(self.focus_beam_process.readAllStandardOutput()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _read_focus_beam_stderr(self):
+        if not self.focus_beam_process:
+            return
+        data = bytes(self.focus_beam_process.readAllStandardError()).decode(errors="replace")
+        self._append_ps_usb_output(data)
+
+    def _focus_beam_finished(self, exit_code, exit_status):
+        self._read_focus_beam_stdout()
+        self._read_focus_beam_stderr()
+        next_step = self._focus_beam_next_step
+        self._focus_beam_next_step = None
+        self.focus_beam_process = None
+        success = exit_code == 0 and exit_status == QProcess.ExitStatus.NormalExit
+        if success:
+            self._append_ps_usb_output("Focus beam command finished.\n")
+        else:
+            self._append_ps_usb_output(f"Focus beam command failed, exit code {exit_code}.\n")
+        if next_step == "matlab" and success:
+            self._start_focus_matlab_generation()
+        elif next_step == "restore":
+            self._restore_after_focus_update()
+        else:
+            self._finish_focus_update(False)
+
+    def _focus_beam_error(self, error):
+        self._append_ps_usb_output(f"Focus beam QProcess error: {error}\n")
+        if self.focus_beam_process and self.focus_beam_process.state() == QProcess.ProcessState.NotRunning:
+            self.focus_beam_process = None
+            self._finish_focus_update(False)
+
+    def _finish_focus_update(self, success):
+        self._focus_config_success = bool(success)
+        if self._focus_restart_after_finish:
+            self._append_ps_usb_output("Sending BEAM START before restoring acquisition...\n")
+            self._start_focus_beam_control("start", "restore")
+            return
+        self._restore_after_focus_update()
+
+    def _restore_after_focus_update(self):
+        restart = self._focus_restart_after_finish
+        restore_paused = self._focus_restore_paused
+        bmode_values = self._focus_saved_bmode_values or self._current_bmode_values()
+        success = self._focus_config_success
+
+        self._focus_update_in_progress = False
+        self._focus_restart_after_finish = False
+        self._focus_restore_paused = False
+        self._focus_saved_bmode_values = None
+        self._focus_config_success = False
+        self._focus_beam_next_step = None
+        self.pending_focus_depth_mm = None
+        self._set_focus_controls_enabled(True)
+
+        if restart and not self._cleanup_started:
+            self._append_ps_usb_output("Restarting live acquisition after focus update...\n")
+            self._paused = False
+            self.freeze_button.setText("FREEZE")
+            self.pipeline.start(bmode_values)
+            if restore_paused and self.pipeline.running:
+                self._paused = True
+                self.pipeline.pause(True)
+                self.freeze_button.setText("RESUME")
+            self._append_ps_usb_output("Acquisition restored.\n")
+        elif not self._cleanup_started:
+            self._set_status("Stopped")
+
+        if success:
+            self._append_ps_usb_output(f"Focus update complete: {self.applied_focus_depth_mm:.1f} mm applied.\n")
+        else:
+            self._append_ps_usb_output("Focus update failed or was aborted. UI focus marker keeps the requested target.\n")
+
     def _toggle_run(self):
         if self.pipeline.running:
             self._stop()
@@ -1781,6 +2119,7 @@ class UltrasoundMainWindow(QMainWindow):
         self.depth_slider.setValue(int(round(self.full_depth_mm)))
         self.depth_slider.blockSignals(False)
         self.display_depth_mm = self.full_depth_mm
+        self.pipeline.set_display_depth_mm(self.display_depth_mm)
         self._update_depth_labels()
         self.imaging_labels["dynamic_range"].setText(f"{self.dynamic_range_db:.0f} dB")
         self.imaging_labels["brightness"].setText(f"{self.brightness_db:.1f} dB")
@@ -1790,6 +2129,7 @@ class UltrasoundMainWindow(QMainWindow):
 
     def _display_depth_changed(self, value):
         self.display_depth_mm = float(np.clip(value, self.min_display_depth_mm, self.full_depth_mm))
+        self.pipeline.set_display_depth_mm(self.display_depth_mm)
         self._update_depth_labels()
         self._update_overlay()
 
@@ -1916,7 +2256,7 @@ class UltrasoundMainWindow(QMainWindow):
     def _update_params(self):
         self._update_depth_labels()
         self.imaging_labels["frequency"].setText(f"{self.params['probe_frequency_mhz']:.1f} MHz")
-        self.imaging_labels["focus"].setText(f"{self.focus_depth_mm:.0f} mm")
+        self._update_focus_labels()
         self.imaging_labels["dynamic_range"].setText(f"{self.dynamic_range_db:.0f} dB")
         self.imaging_labels["brightness"].setText(f"{self.brightness_db:.1f} dB")
         self.imaging_labels["contrast"].setText(f"{self.contrast_gain:.2f}x")
@@ -2400,6 +2740,9 @@ class UltrasoundMainWindow(QMainWindow):
         self._terminate_qprocess("ps_advanced_config_process")
         self._terminate_qprocess("ps_usb_config_process")
         self._terminate_qprocess("ps_usb_beam_process")
+        self._terminate_qprocess("focus_matlab_process")
+        self._terminate_qprocess("focus_usb_config_process")
+        self._terminate_qprocess("focus_beam_process")
         self.pipeline.stop()
 
     def closeEvent(self, event):
