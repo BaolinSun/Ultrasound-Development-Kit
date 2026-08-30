@@ -18,6 +18,7 @@ BC0_FILE = "Algo_BC0.bin"
 NUM_TGC_BANDS = 8
 BC0_DTYPE = np.uint16
 IMAGE_AREA_THRESHOLD = 0.15
+WINDOW_OCCUPANCY = 0.3
 
 _MISSING = object()
 
@@ -142,20 +143,44 @@ def _longest_run(mask):
     return int(starts[longest]), int(stops[longest])
 
 
-def crop_image_area(gray, threshold=IMAGE_AREA_THRESHOLD, occupancy=0.5):
+def crop_image_area(gray, image_width_px=None, threshold=IMAGE_AREA_THRESHOLD, occupancy=0.5,
+                    window_occupancy=WINDOW_OCCUPANCY):
     """Locate the B-mode image rectangle in a console screenshot, returning (image, bounds).
 
-    Columns are found from the longest contiguous run of above-threshold column means, which
-    rejects the narrow graymap bar, the TGC curve overlay and the depth ruler ticks. Rows are
-    then found from pixel occupancy rather than brightness, because an extreme TGC setting can
-    crush a whole depth band to black and would otherwise split the run.
+    Pass image_width_px (BImageWidth) whenever it is available. The columns are then derived
+    from geometry: pixel occupancy locates the B window - which reproduces WinLeft..WinLeft+
+    WinWidth exactly and does not depend on how bright the image is - and the image is taken
+    centred in that window with the width the console reports.
+
+    Without image_width_px the columns fall back to the longest contiguous run of
+    above-threshold column means. That heuristic breaks on dark images: the threshold is set
+    by the brightest column, which is the graymap bar, and a fundamental-mode image can sit
+    entirely below it, leaving the Hisense logo as the longest surviving run.
+
+    Rows always come from pixel occupancy rather than brightness, because an extreme TGC
+    setting can crush a whole depth band to black and would otherwise split the run.
     """
     gray = np.asarray(gray, dtype=np.float64)
-    col_mean = gray.mean(axis=0)
-    col0, col1 = _longest_run(col_mean > col_mean.max() * threshold)
+    if image_width_px is not None:
+        column_occupancy = (gray > 0).mean(axis=0)
+        inside = np.flatnonzero(column_occupancy > window_occupancy)
+        if inside.size == 0:
+            raise ValueError("No B window found in the screenshot")
+        centre = (inside[0] + inside[-1] + 1) / 2.0
+        col0 = max(0, int(round(centre - float(image_width_px) / 2.0)))
+        col1 = min(gray.shape[1], int(round(centre + float(image_width_px) / 2.0)))
+    else:
+        col_mean = gray.mean(axis=0)
+        col0, col1 = _longest_run(col_mean > col_mean.max() * threshold)
+
     row_occupancy = (gray[:, col0:col1] > 0).mean(axis=1)
     row0, row1 = _longest_run(row_occupancy > occupancy)
     return gray[row0:row1, col0:col1], (row0, row1, col0, col1)
+
+
+def crop_capture_image(capture, **kwargs):
+    """Load a capture's screenshot and crop it to the B-mode image using its own geometry."""
+    return crop_image_area(load_screenshot(capture.path), capture.geometry.image_width_px, **kwargs)
 
 
 def load_screenshot(capture_dir):

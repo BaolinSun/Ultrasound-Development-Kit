@@ -42,6 +42,7 @@ from hisense_loader import (
     find_captures,
     load_capture,
     load_screenshot,
+    crop_capture_image,
 )
 
 
@@ -56,7 +57,7 @@ USABLE_GRAY = (6, 120)
 
 def common_crop(captures):
     """Crop every capture's screenshot to a shared shape so pixels correspond."""
-    images = {c.name: crop_image_area(load_screenshot(c.path))[0] for c in captures}
+    images = {c.name: crop_capture_image(c)[0] for c in captures}
     height = min(v.shape[0] for v in images.values())
     width = min(v.shape[1] for v in images.values())
     return {name: value[:height, :width] for name, value in images.items()}, (height, width)
@@ -147,7 +148,7 @@ def response_units_per_count(capture, grid, phi, usable_gray=USABLE_GRAY, row_st
     line on every row. Fitting rows independently and taking the median is robust to the cyst
     and wire targets that sit on only some rows.
     """
-    image = crop_image_area(load_screenshot(capture.path))[0]
+    image = crop_capture_image(capture)[0]
     bc0 = scan_convert_linear(capture.bc0, image.shape[0], image.shape[1])
     slopes = []
     for row in range(row_step * 2, image.shape[0] - row_step, row_step):

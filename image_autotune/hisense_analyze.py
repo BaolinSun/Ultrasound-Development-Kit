@@ -35,6 +35,7 @@ from hisense_loader import (
     find_captures,
     load_capture,
     load_screenshot,
+    crop_capture_image,
 )
 from hisense_metrics import depth_band_levels, summarise
 from hisense_tgc_optimizer import optimise_capture
@@ -48,7 +49,7 @@ def plot_capture_overview(captures, calibration, out_path):
     fig, axes = plt.subplots(2, len(captures), figsize=(4.2 * len(captures), 8.4))
     axes = np.atleast_2d(axes)
     for column, capture in enumerate(captures):
-        actual = crop_image_area(load_screenshot(capture.path))[0]
+        actual = crop_capture_image(capture)[0]
         predicted = render(
             capture.bc0,
             tgc_levels=capture.tgc_levels,
@@ -93,13 +94,13 @@ def plot_tgc_identification(captures, calibration, out_path):
 
         gray_per_db = GRAY_MAX / float(dynamic_range)
         reference_bands = np.mean(
-            [depth_band_levels(crop_image_area(load_screenshot(f.path))[0].astype(float)) for f in flats],
+            [depth_band_levels(crop_capture_image(f)[0].astype(float)) for f in flats],
             axis=0,
         )
         colour = colours[index % len(colours)]
         levels_in, gains_in, levels_out, gains_out = [], [], [], []
         for capture in swept:
-            bands = depth_band_levels(crop_image_area(load_screenshot(capture.path))[0].astype(float))
+            bands = depth_band_levels(crop_capture_image(capture)[0].astype(float))
             gains_db = (bands - reference_bands) / gray_per_db
             for level, gain_db in zip(capture.tgc_levels, gains_db):
                 inside = CALIBRATED_LEVEL_RANGE[0] <= level <= CALIBRATED_LEVEL_RANGE[1]
@@ -134,7 +135,7 @@ def plot_depth_profiles(captures, calibration, out_path):
     """Actual versus simulated depth profiles, and the calibrated depth response."""
     fig, axes = plt.subplots(1, 2, figsize=(13, 5))
     for capture in captures:
-        actual = crop_image_area(load_screenshot(capture.path))[0]
+        actual = crop_capture_image(capture)[0]
         predicted = render(
             capture.bc0,
             tgc_levels=capture.tgc_levels,

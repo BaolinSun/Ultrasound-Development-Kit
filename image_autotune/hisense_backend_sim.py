@@ -40,6 +40,7 @@ from hisense_loader import (
     find_captures,
     load_capture,
     load_screenshot,
+    crop_capture_image,
 )
 
 
@@ -223,7 +224,7 @@ def calibrate_depth_response(
         counts_per_db = fitted_counts if counts_per_db is None else counts_per_db
         reference_db = fitted_reference if reference_db is None else reference_db
 
-    screen = crop_image_area(load_screenshot(capture.path))[0]
+    screen = crop_capture_image(capture)[0]
     dynamic_range_db = float(capture.dynamic_range_level)
     screen_db = gray_to_db(screen, dynamic_range_db, reference_db)
     bc0_db = bc0_to_db(scan_convert_linear(capture.bc0, screen.shape[0], screen.shape[1]), counts_per_db)
@@ -301,14 +302,14 @@ def calibrate_tgc_db_per_level(
         gray_per_db = GRAY_MAX / float(dynamic_range_level)
         ref_bands = np.mean(
             [
-                _band_medians(crop_image_area(load_screenshot(flat.path))[0])
+                _band_medians(crop_capture_image(flat)[0])
                 - gray_per_db * float(tgc_level_to_db(flat.tgc_levels[0], db_per_level))
                 for flat in flats
             ],
             axis=0,
         )
         for capture in swept:
-            bands = _band_medians(crop_image_area(load_screenshot(capture.path))[0])
+            bands = _band_medians(crop_capture_image(capture)[0])
             for level, delta_gray in zip(capture.tgc_levels, bands - ref_bands):
                 if level_range[0] <= level <= level_range[1]:
                     levels.append(float(level))
@@ -333,7 +334,7 @@ def calibrate_counts_per_db(capture, gray_low=5, gray_high=250):
     Uses the unsaturated middle half of the image, where displayed gray is affine in BC0.
     Returns (counts_per_db, reference_db, slope_gray_per_count).
     """
-    screen = crop_image_area(load_screenshot(capture.path))[0]
+    screen = crop_capture_image(capture)[0]
     resampled = scan_convert_linear(capture.bc0, screen.shape[0], screen.shape[1])
 
     start, stop = 3 * screen.shape[0] // 8, 5 * screen.shape[0] // 8
@@ -364,7 +365,7 @@ def validate_capture(capture, depth_response_db, reference_db, counts_per_db, db
 
     Returns (actual_bands, predicted_bands) as per-TGC-band median gray levels.
     """
-    actual = crop_image_area(load_screenshot(capture.path))[0]
+    actual = crop_capture_image(capture)[0]
     predicted = render(
         capture.bc0,
         tgc_levels=capture.tgc_levels,
