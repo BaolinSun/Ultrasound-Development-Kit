@@ -1,22 +1,24 @@
-function delay_fpga = para_transmit_delay(output_dir, write_json, F)
+function delay_fpga = para_transmit_delay(output_dir, write_outputs, F)
 %PARA_TRANSMIT_DELAY Generate the mapped TX7332 delay profile.
 %
-% delay_fpga = para_transmit_delay(output_dir, write_json, F) calculates all
+% delay_fpga = para_transmit_delay(output_dir, write_outputs, F) calculates all
 % per-element parameters in natural physical order, maps them once at the
 % TX hardware boundary, and packs 11 active register groups into each
-% fixed 128-word block. JSON output remains enabled by default.
+% fixed 128-word block. JSON and C source output remain enabled by default.
 
+this_dir = fileparts(mfilename('fullpath'));
+addpath(fullfile(this_dir, 'scripts'));
 if nargin < 3 || isempty(F)
     F = 80e-3;
 end
 if nargin < 2
-    write_json = true;
+    write_outputs = true;
 end
 if nargin < 1
     output_dir = [];
 end
-if write_json && isempty(output_dir)
-    output_dir = default_config_dir();
+if write_outputs && isempty(output_dir)
+    output_dir = fullfile(this_dir, '..', 'configs');
 end
 
 pitch       = 0.3e-3;
@@ -36,16 +38,14 @@ zz = F * cos(theta);
 
 physical_delay = zeros(nxmits, element_num);
 for ixmit = 1:nxmits
-    physical_delay(ixmit, :) = cal_phased_array_transmit_delay( ...
-        probe_geometry_vectors, [xx(ixmit), yy(ixmit), zz(ixmit)], F, c);
+    physical_delay(ixmit, :) = cal_phased_array_transmit_delay(probe_geometry_vectors, [xx(ixmit), yy(ixmit), zz(ixmit)], F, c);
 end
 
 % Quantization stays in natural physical-element order. Mapping happens
 % once, immediately before the TX7332 hardware-channel packing boundary.
 physical_delay_int = int32(floor(physical_delay / 10e-9));
 channel_map = load_probe_channel_map();
-hardware_delay_int = map_physical_to_tx_hardware( ...
-    physical_delay_int, channel_map);
+hardware_delay_int = map_physical_to_tx_hardware(physical_delay_int, channel_map);
 
 % TX7332 profile-0 delay register layout.
 grp1_addr = [0x28, 0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F];
@@ -61,15 +61,12 @@ delay_low_channel = [grp1_lreg; grp2_lreg];
 
 % Pulser enables are expressed only in natural physical-element order.
 physical_tx_enable = true(nxmits, element_num);
-hardware_tx_enable = logical(map_physical_to_tx_hardware( ...
-    physical_tx_enable, channel_map));
+hardware_tx_enable = logical(map_physical_to_tx_hardware(physical_tx_enable, channel_map));
 pdn_mask_chip1 = zeros(nxmits, 1, 'uint32');
 pdn_mask_chip2 = zeros(nxmits, 1, 'uint32');
 for ixmit = 1:nxmits
-    pdn_mask_chip1(ixmit) = ...
-        pack_tx7332_pdn_mask(hardware_tx_enable(ixmit, 1:32));
-    pdn_mask_chip2(ixmit) = ...
-        pack_tx7332_pdn_mask(hardware_tx_enable(ixmit, 33:64));
+    pdn_mask_chip1(ixmit) = pack_tx7332_pdn_mask(hardware_tx_enable(ixmit, 1:32));
+    pdn_mask_chip2(ixmit) = pack_tx7332_pdn_mask(hardware_tx_enable(ixmit, 33:64));
 end
 
 WORDS_PER_GROUP = 8;
@@ -86,19 +83,15 @@ GROUP_LOAD_PROFILE = 11;
 physical_tr_enable = false(BLOCKS_PER_LINE, element_num);
 physical_tr_enable(1, 1:32) = true;
 physical_tr_enable(2, 33:64) = true;
-hardware_tr_enable = logical(map_physical_to_tx_hardware( ...
-    physical_tr_enable, channel_map));
+hardware_tr_enable = logical(map_physical_to_tx_hardware(physical_tr_enable, channel_map));
 tr_mask_chip1 = zeros(BLOCKS_PER_LINE, 1, 'uint32');
 tr_mask_chip2 = zeros(BLOCKS_PER_LINE, 1, 'uint32');
 for acquisition = 1:BLOCKS_PER_LINE
-    tr_mask_chip1(acquisition) = ...
-        pack_tx7332_tr_switch_mask(hardware_tr_enable(acquisition, 1:32));
-    tr_mask_chip2(acquisition) = ...
-        pack_tx7332_tr_switch_mask(hardware_tr_enable(acquisition, 33:64));
+    tr_mask_chip1(acquisition) = pack_tx7332_tr_switch_mask(hardware_tr_enable(acquisition, 1:32));
+    tr_mask_chip2(acquisition) = pack_tx7332_tr_switch_mask(hardware_tr_enable(acquisition, 33:64));
 end
 
-self_check_channel_mapping(channel_map, delay_reg_addr, ...
-    delay_high_channel, delay_low_channel);
+self_check_channel_mapping(channel_map, delay_reg_addr, delay_high_channel, delay_low_channel);
 
 block_num = nxmits * BLOCKS_PER_LINE;
 fpga_blocks = zeros(WORDS_PER_GROUP, GROUPS_PER_BLOCK, block_num, 'uint32');
@@ -106,31 +99,23 @@ fpga_blocks = zeros(WORDS_PER_GROUP, GROUPS_PER_BLOCK, block_num, 'uint32');
 for ixmit = 1:nxmits
     chip1_delay = uint32(hardware_delay_int(ixmit, 1:32));
     chip2_delay = uint32(hardware_delay_int(ixmit, 33:64));
-
+    
     for acquisition = 1:BLOCKS_PER_LINE
         block_index = BLOCKS_PER_LINE * (ixmit - 1) + acquisition;
-
+        
         % Groups 1..8: profile-0 delays for all 64 TX channels.
         for delay_group = DELAY_GROUPS
-            fpga_blocks(:, delay_group, block_index) = pack_delay_group( ...
-                chip1_delay, chip2_delay, delay_group, delay_reg_addr, ...
-                delay_high_channel, delay_low_channel);
+            fpga_blocks(:, delay_group, block_index) = pack_delay_group( chip1_delay, chip2_delay, delay_group, delay_reg_addr, delay_high_channel, delay_low_channel);
         end
-
+        
         % Group 9: T/R switch mask (register 0x1A).
-        fpga_blocks(:, GROUP_TR_SWITCH, block_index) = ...
-            pack_global_register_group(0x1A, ...
-                tr_mask_chip1(acquisition), tr_mask_chip2(acquisition));
-
+        fpga_blocks(:, GROUP_TR_SWITCH, block_index) = pack_global_register_group(0x1A, tr_mask_chip1(acquisition), tr_mask_chip2(acquisition));
+        
         % Group 10: pulser power-down mask (register 0x1B).
-        fpga_blocks(:, GROUP_PULSER_MASK, block_index) = ...
-            pack_global_register_group(0x1B, ...
-                pdn_mask_chip1(ixmit), pdn_mask_chip2(ixmit));
-
+        fpga_blocks(:, GROUP_PULSER_MASK, block_index) = pack_global_register_group(0x1B, pdn_mask_chip1(ixmit), pdn_mask_chip2(ixmit));
+        
         % Group 11: load the delay profile written by groups 1..8.
-        fpga_blocks(:, GROUP_LOAD_PROFILE, block_index) = ...
-            pack_global_register_group(0x00, ...
-                uint32(0x00000008), uint32(0x00000008));
+        fpga_blocks(:, GROUP_LOAD_PROFILE, block_index) = pack_global_register_group(0x00, uint32(0x00000008), uint32(0x00000008));
     end
 end
 
@@ -144,36 +129,29 @@ verify_register_blocks(fpga_blocks, tr_mask_chip1, tr_mask_chip2, ...
 
 % MATLAB column-major flattening yields 8 words/group, 16 groups/block.
 delay_fpga = reshape(fpga_blocks, 1, []);
-assert(numel(delay_fpga) == 16384, ...
-    '64 lines x 2 acquisitions x 128 words must equal 16384 words.');
+assert(numel(delay_fpga) == 16384, '64 lines x 2 acquisitions x 128 words must equal 16384 words.');
 
-if write_json
+if write_outputs
     write_bram_json( ...
         output_dir, ...
         'delay_profile_default.json', ...
         'Transmit delay profile generated by para_transmit_delay.m', ...
         {'delay_profile'}, ...
         {delay_fpga});
+    write_C_array_file( ...
+        fullfile(output_dir, 'c_array', 'delay_profile_fpga.c'), ...
+        'u32 delay_profile[16384]', delay_fpga, 8, 8, sprintf('\t'), ...
+        sprintf('#include "bram.h"\n\n\n'));
 end
 end
 
-function words = pack_delay_group( ...
-        chip1_delay, chip2_delay, group_index, ...
-        delay_reg_addr, delay_high_channel, delay_low_channel)
+function words = pack_delay_group(chip1_delay, chip2_delay, group_index, delay_reg_addr, delay_high_channel, delay_low_channel)
 %PACK_DELAY_GROUP Pack one delay-register group for all four SPI streams.
 
-chip1_group1 = pack_delay_pair( ...
-    chip1_delay(delay_high_channel(1, group_index)), ...
-    chip1_delay(delay_low_channel(1, group_index)));
-chip1_group2 = pack_delay_pair( ...
-    chip1_delay(delay_high_channel(2, group_index)), ...
-    chip1_delay(delay_low_channel(2, group_index)));
-chip2_group1 = pack_delay_pair( ...
-    chip2_delay(delay_high_channel(1, group_index)), ...
-    chip2_delay(delay_low_channel(1, group_index)));
-chip2_group2 = pack_delay_pair( ...
-    chip2_delay(delay_high_channel(2, group_index)), ...
-    chip2_delay(delay_low_channel(2, group_index)));
+chip1_group1 = pack_delay_pair(chip1_delay(delay_high_channel(1, group_index)), chip1_delay(delay_low_channel(1, group_index)));
+chip1_group2 = pack_delay_pair(chip1_delay(delay_high_channel(2, group_index)), chip1_delay(delay_low_channel(2, group_index)));
+chip2_group1 = pack_delay_pair(chip2_delay(delay_high_channel(1, group_index)), chip2_delay(delay_low_channel(1, group_index)));
+chip2_group2 = pack_delay_pair(chip2_delay(delay_high_channel(2, group_index)), chip2_delay(delay_low_channel(2, group_index)));
 
 words = uint32([ ...
     delay_reg_addr(1, group_index); chip1_group1; ...
@@ -192,7 +170,7 @@ packed_delay = bitor(bitshift(high_delay, 16), low_delay);
 end
 
 function words = pack_global_register_group( ...
-        register_addr, chip1_data, chip2_data)
+    register_addr, chip1_data, chip2_data)
 %PACK_GLOBAL_REGISTER_GROUP Broadcast one global register to four SPI paths.
 
 register_addr = uint32(register_addr);
@@ -227,8 +205,8 @@ assert(numel(active_local) == 32, ...
 pdn_bit_index = [ ...
     16, 24, 17, 25, 18, 26, 19, 27, ...
     20, 28, 21, 29, 22, 30, 23, 31, ...
-     0,  8,  1,  9,  2, 10,  3, 11, ...
-     4, 12,  5, 13,  6, 14,  7, 15];
+    0,  8,  1,  9,  2, 10,  3, 11, ...
+    4, 12,  5, 13,  6, 14,  7, 15];
 disabled_local = ~logical(active_local(:).');
 pdn_mask = uint32(0);
 for channel = find(disabled_local)
@@ -238,9 +216,9 @@ end
 end
 
 function verify_register_blocks(fpga_blocks, tr_mask_chip1, tr_mask_chip2, ...
-        pdn_mask_chip1, pdn_mask_chip2, words_per_group, groups_per_block, ...
-        blocks_per_line, active_groups, group_tr_switch, ...
-        group_pulser_mask, group_load_profile)
+    pdn_mask_chip1, pdn_mask_chip2, words_per_group, groups_per_block, ...
+    blocks_per_line, active_groups, group_tr_switch, ...
+    group_pulser_mask, group_load_profile)
 %VERIFY_REGISTER_BLOCKS Check all fixed 128-word register block invariants.
 
 block_num = size(fpga_blocks, 3);
@@ -278,7 +256,7 @@ assert(all(reshape(fpga_blocks(words_per_group, groups_per_block, :), [], 1) ...
 end
 
 function self_check_channel_mapping(channel_map, delay_reg_addr, ...
-        delay_high_channel, delay_low_channel)
+    delay_high_channel, delay_low_channel)
 %SELF_CHECK_CHANNEL_MAPPING Verify delays and sparse 0x1A/0x1B masks.
 
 physical_delay = uint32(1:64);
@@ -304,31 +282,31 @@ end
 assert(isequal(decoded_hardware, expected_hardware), ...
     'The eight delay groups do not preserve all 64 mapped channels.');
 assert(decoded_hardware(1) == 2 && decoded_hardware(2) == 1 && ...
-       decoded_hardware(31) == 32 && decoded_hardware(32) == 31 && ...
-       decoded_hardware(33) == 34 && decoded_hardware(34) == 33 && ...
-       decoded_hardware(63) == 64 && decoded_hardware(64) == 63, ...
+    decoded_hardware(31) == 32 && decoded_hardware(32) == 31 && ...
+    decoded_hardware(33) == 34 && decoded_hardware(34) == 33 && ...
+    decoded_hardware(63) == 64 && decoded_hardware(64) == 63, ...
     'Boundary physical elements did not reach the expected TX channels.');
 
 tr_bit_index = [16:31, 0:15];
 pdn_bit_index = [ ...
     16, 24, 17, 25, 18, 26, 19, 27, ...
     20, 28, 21, 29, 22, 30, 23, 31, ...
-     0,  8,  1,  9,  2, 10,  3, 11, ...
-     4, 12,  5, 13,  6, 14,  7, 15];
+    0,  8,  1,  9,  2, 10,  3, 11, ...
+    4, 12,  5, 13,  6, 14,  7, 15];
 
 for physical = 1:64
     physical_enable = true(1, 64);
     physical_enable(physical) = false;
     hardware_enable = logical(map_physical_to_tx_hardware( ...
         physical_enable, channel_map));
-
+    
     tr1 = pack_tx7332_tr_switch_mask(hardware_enable(1:32));
     tr2 = pack_tx7332_tr_switch_mask(hardware_enable(33:64));
     pdn1 = pack_tx7332_pdn_mask(hardware_enable(1:32));
     pdn2 = pack_tx7332_pdn_mask(hardware_enable(33:64));
     tr_words = pack_global_register_group(0x1A, tr1, tr2);
     pdn_words = pack_global_register_group(0x1B, pdn1, pdn2);
-
+    
     expected_tr_words = [uint32(0x1A); tr1; uint32(0x1A); tr1; ...
         uint32(0x1A); tr2; uint32(0x1A); tr2];
     expected_pdn_words = [uint32(0x1B); pdn1; uint32(0x1B); pdn1; ...
@@ -341,7 +319,7 @@ for physical = 1:64
         'Physical element %d set an invalid number of 0x1A bits.', physical);
     assert(sum(bitget(pdn1, 1:32)) + sum(bitget(pdn2, 1:32)) == 1, ...
         'Physical element %d set an invalid number of 0x1B bits.', physical);
-
+    
     device = channel_map.tx_device(physical);
     local_channel = channel_map.tx_local_channel(physical);
     tr_masks = [tr1, tr2];
@@ -356,7 +334,7 @@ fprintf('PASS: TX delay, T/R and pulser channel mapping self-check\n');
 end
 
 function decoded = decode_delay_group(decoded, words, group_index, ...
-        delay_high_channel, delay_low_channel)
+    delay_high_channel, delay_low_channel)
 %DECODE_DELAY_GROUP Decode one group for self-checking only.
 
 chip_offsets = [0, 0, 32, 32];
@@ -376,7 +354,7 @@ end
 end
 
 function delay_vec = cal_phased_array_transmit_delay( ...
-        probe_geometry_vectors, focus_point, F, c)
+    probe_geometry_vectors, focus_point, F, c)
 %CAL_PHASED_ARRAY_TRANSMIT_DELAY Calculate delays in physical order.
 
 fp = focus_point(:)';

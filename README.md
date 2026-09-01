@@ -49,8 +49,10 @@ The desktop app starts the acquisition and processing workers, receives processe
 |   |-- ultrasound_config_usb.py     # USB runtime configuration sender
 |   |-- ultrasound_config_gui.py     # GUI for configuration preview/sending
 |   |-- calc_dtgc_registers.py       # AFE5832 DTGC register calculator
-|   |-- configs/                     # Default JSON configuration files
-|   `-- para_cal/                    # MATLAB generators for BRAM JSON defaults
+|   |-- configs/                     # Default JSON parameter files
+|   |   `-- c_array/                 # Generated Vitis-ready C array sources
+|   `-- para_cal/                    # MATLAB BRAM parameter entry points
+|       `-- scripts/                 # Shared MATLAB helpers and probe channel map
 |-- docs/
 |   `-- hisense_acquisition_protocol.md  # Calibration sweep protocol for the Hisense console
 |-- image_autotune/                  # Image-feedback automatic parameter tuning
@@ -242,16 +244,18 @@ searching. The display response is known to be nonlinear and is not yet wired in
 
 ## MATLAB Parameter Generation
 
-MATLAB 脚本位于 `tools/para_cal/`，用于生成或更新 BRAM 相关默认 JSON 配置，包括 delay profile、demod coefficients、log table、x element、hamming、dfilter、timing 和 sin beta 等。
+MATLAB 脚本位于 `tools/para_cal/`，用于生成或更新 BRAM 相关默认 JSON 配置及可复制到 Vitis 工程的 C 数组 TXT，包括 delay profile、demod coefficients、log table、x element、hamming、dfilter、timing 和 sin beta 等。
 
 在 MATLAB 中运行：
 
 ```matlab
 cd tools/para_cal
-generate_bram_json_defaults
+generate_bram_defaults
 ```
 
-The MATLAB generators write JSON outputs to `tools/configs/` by default. Pass a custom output directory to avoid overwriting production defaults during experiments.
+The MATLAB generators write 8 JSON files to `tools/configs/` and 8 matching C source files to `tools/configs/c_array/` by default. Demodulation sine and cosine arrays share `demod_coeffs.c`. Both formats come from the same quantized word arrays. Pass a custom output directory to preserve the same JSON plus `c_array/` layout without overwriting production defaults during experiments.
+
+延时数组输出为 `tools/configs/c_array/delay_profile_fpga.c`，可直接复制到 Vitis 工程。
 
 ## Notes
 

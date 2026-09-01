@@ -1,5 +1,6 @@
 function hardware_values = map_physical_to_tx_hardware(physical_values, channel_map)
 %MAP_PHYSICAL_TO_TX_HARDWARE Convert natural element order to TX channels.
+% Shared helper for the transmit-delay generator.
 %
 % Input column N is physical element N. Output column N is TX global
 % hardware channel N. The explicit map prevents compensation in packers.

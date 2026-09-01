@@ -4,7 +4,8 @@
 !*.json
 !*.m
 !*.bat
-!tools/configs/probe_channel_map.csv
+!tools/para_cal/scripts/probe_channel_map.csv
+!tools/configs/c_array/*.c
 !.gitignore
 !README.md
 !docs/*.md

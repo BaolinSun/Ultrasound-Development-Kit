@@ -1,5 +1,6 @@
 function write_bram_json(output_dir, file_name, description, section_names, section_values)
 %WRITE_BRAM_JSON Write BRAM parameter sections using the UART JSON schema.
+% Shared output helper for BRAM parameter generators.
 if numel(section_names) ~= numel(section_values)
     error('write_bram_json:SectionMismatch', ...
           'section_names and section_values must have the same length.');

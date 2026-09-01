@@ -431,14 +431,6 @@ def usb_reader(data_queue, stop_flag, pause_flag=None):
         if line_set:
             data_queue.put(rfdata)
 
-        # if cnt % 20 == 0 or len(line_set) < DEFAULT_CHANNEL_COUNT:
-        #     print(
-        #         f"[USB] window={cnt}, headers={len(indices)}, "
-        #         f"valid_lines={len(line_set)}/{DEFAULT_CHANNEL_COUNT}, "
-        #         # f"line_set={sorted(line_set)}"
-        #     )
-
-
     usb.util.dispose_resources(dev)
     print("[USB] Stop.")
 

@@ -2,7 +2,7 @@ function channel_map = load_probe_channel_map()
 %LOAD_PROBE_CHANNEL_MAP Load and validate the fixed probe/TX wiring map.
 
 this_dir = fileparts(mfilename('fullpath'));
-map_path = fullfile(this_dir, '..', 'configs', 'probe_channel_map.csv');
+map_path = fullfile(this_dir, 'probe_channel_map.csv');
 channel_map = readtable(map_path, 'Delimiter', ',');
 
 expected_columns = {'physical_element', 'tx_global_channel', 'tx_device', ...
